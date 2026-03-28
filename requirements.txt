@@ -11,3 +11,5 @@ httpx
 requests
 python-dotenv
 pytest
+gTTS
+python-multipart

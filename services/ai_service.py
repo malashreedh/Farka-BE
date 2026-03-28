@@ -1,7 +1,9 @@
 import os
+import io
 import json
 import re
 from openai import OpenAI
+from gtts import gTTS
 from .language_service import get_language_instruction
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -212,6 +214,52 @@ def generate_checklist(profile) -> tuple:
     except Exception as exc:
         print(f"[ai_service] Checklist generation error: {exc}")
         return FALLBACK_CHECKLIST, f"Fallback used — error: {exc}"
+
+
+def transcribe_audio(audio_file) -> str:
+    """
+    Transcribe an audio file to text using OpenAI Whisper.
+    Supports both English and Nepali speech.
+
+    Args:
+        audio_file: File-like object (e.g. from FastAPI UploadFile.file).
+
+    Returns:
+        Transcribed text string.
+    """
+    try:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+        )
+        return transcript.text
+    except Exception as exc:
+        print(f"[ai_service] Whisper transcription error: {exc}")
+        return ""
+
+
+def synthesize_speech(text: str, language: str) -> bytes:
+    """
+    Convert text to speech audio using gTTS.
+    Supports English ("en") and Nepali ("ne").
+
+    Args:
+        text:     The text to convert to speech.
+        language: "en" or "ne".
+
+    Returns:
+        MP3 audio as bytes. Returns empty bytes if synthesis fails.
+    """
+    gtts_lang = "ne" if language == "ne" else "en"
+    try:
+        tts = gTTS(text=text, lang=gtts_lang, slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+        return audio_buffer.read()
+    except Exception as exc:
+        print(f"[ai_service] gTTS synthesis error: {exc}")
+        return b""
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
