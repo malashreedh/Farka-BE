@@ -15,7 +15,6 @@ ENUM_FIELDS = {
 
 def sanitize_profile_updates(payload: dict[str, Any]) -> dict[str, Any]:
     clean: dict[str, Any] = {}
-
     for key, value in payload.items():
         if value is None:
             continue
@@ -28,6 +27,8 @@ def sanitize_profile_updates(payload: dict[str, Any]) -> dict[str, Any]:
         if key == "skills":
             if isinstance(value, list):
                 clean[key] = [str(item).strip() for item in value if str(item).strip()]
+            elif isinstance(value, str) and value.strip():
+                clean[key] = [part.strip() for part in value.split(",") if part.strip()]
             continue
 
         clean[key] = value

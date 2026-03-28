@@ -1,8 +1,8 @@
 import copy
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from database import get_db
 from models import BusinessChecklist, Profile

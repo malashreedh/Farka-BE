@@ -11,37 +11,30 @@ from openai import OpenAI
 from models import ChatSession, Profile
 from schemas import ChecklistItem
 from services.language_service import get_language_instruction
+from services.workflow_config import DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
 
 load_dotenv()
 
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+FALLBACK_MODELS = [OPENAI_MODEL, "gpt-4o-mini", "gpt-4o"]
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 
-SKILL_TAGS = {
-    "construction": ["formwork", "concrete pouring", "site supervision", "scaffolding", "MEP works", "safety management", "equipment operation", "masonry", "plumbing", "electrical fitting"],
-    "hospitality": ["front desk", "housekeeping", "food service", "kitchen prep", "event management", "bartending", "guest relations", "hotel operations", "tour guiding", "cleaning supervision"],
-    "manufacturing": ["machine operation", "quality control", "assembly line", "welding", "fabrication", "inventory management", "forklift operation", "production planning", "packaging"],
-    "agriculture": ["crop management", "irrigation", "livestock", "greenhouse", "organic farming", "harvesting", "agri-machinery", "soil testing", "pest control", "market selling"],
-    "transport": ["heavy vehicle driving", "logistics", "route planning", "vehicle maintenance", "cargo handling", "fleet management", "customer service", "GPS navigation"],
-    "tech": ["web development", "data entry", "IT support", "networking", "social media", "graphic design", "video editing", "mobile apps", "customer support", "digital marketing"],
-    "domestic": ["childcare", "elder care", "cooking", "cleaning", "home management", "tutoring", "driving", "security", "laundry", "event catering"],
-}
-
 TRADE_KEYWORDS = {
-    "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold"],
-    "hospitality": ["hotel", "restaurant", "hospitality", "kitchen", "housekeeping", "guest"],
-    "manufacturing": ["factory", "manufacturing", "welding", "assembly", "machine"],
-    "agriculture": ["farm", "agriculture", "crop", "livestock", "harvest"],
-    "domestic": ["housemaid", "domestic", "caregiver", "childcare", "elder care", "home"],
-    "transport": ["driver", "transport", "logistics", "cargo", "vehicle"],
-    "tech": ["tech", "it", "developer", "computer", "digital", "support"],
+    "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold", "निर्माण", "मिस्त्री"],
+    "hospitality": ["hotel", "restaurant", "hospitality", "kitchen", "housekeeping", "guest", "hotel operations", "होटल", "रेस्टुरेन्ट"],
+    "manufacturing": ["factory", "manufacturing", "welding", "assembly", "machine", "फ्याक्ट्री", "मेसिन"],
+    "agriculture": ["farm", "agriculture", "crop", "livestock", "harvest", "कृषि", "खेती", "पशुपालन"],
+    "domestic": ["housemaid", "domestic", "caregiver", "childcare", "elder care", "home", "घरेलु", "हेरचाह"],
+    "transport": ["driver", "transport", "logistics", "cargo", "vehicle", "ड्राइभर", "यातायात"],
+    "tech": ["tech", "it", "developer", "computer", "digital", "support", "प्रविधि", "कम्प्युटर"],
 }
 
 DISTRICTS = ["Kathmandu", "Lalitpur", "Bhaktapur", "Pokhara", "Chitwan", "Biratnagar", "Butwal"]
 SAVINGS_MAP = {
-    "under_5L": ["under 5", "under_5l", "below 5", "less than 5"],
-    "5L_to_20L": ["5l_to_20l", "5 to 20", "5-20", "between 5 and 20"],
-    "20L_to_50L": ["20l_to_50l", "20 to 50", "20-50", "between 20 and 50"],
-    "above_50L": ["above 50", "more than 50", "over 50", "above_50l"],
+    "under_5L": ["under 5", "under_5l", "below 5", "less than 5", "5 लाखभन्दा कम"],
+    "5L_to_20L": ["5l_to_20l", "5 to 20", "5-20", "between 5 and 20", "५ देखि २०"],
+    "20L_to_50L": ["20l_to_50l", "20 to 50", "20-50", "between 20 and 50", "२० देखि ५०"],
+    "above_50L": ["above 50", "more than 50", "over 50", "above_50l", "५० लाखभन्दा माथि"],
 }
 
 EXTRACT_PATTERN = re.compile(r"<extract>(.*?)</extract>", re.DOTALL)
@@ -49,27 +42,217 @@ EXTRACT_PATTERN = re.compile(r"<extract>(.*?)</extract>", re.DOTALL)
 
 def get_welcome_message(language: str) -> str:
     if language == "ne":
-        return "नमस्ते! म FARKA हुँ। म विदेशमा काम गर्ने नेपालीहरूलाई घर फर्कने बाटो खोज्न मद्दत गर्छु। पहिले भन्नुस् — अहिले तपाईं कहाँ हुनुहुन्छ?"
-    return "Namaste! I'm FARKA. I help Nepali workers abroad find their path back home — whether that's a job or starting a business. First, tell me: where are you right now?"
+        return (
+            "नमस्ते! म FARKA हुँ। म विदेशबाट फर्किन चाहने नेपालीहरूलाई "
+            "नेपालमा जागिर वा व्यवसायको बाटो खोज्न मद्दत गर्छु। "
+            "सुरु गरौं, अहिले तपाईं कहाँ हुनुहुन्छ?"
+        )
+    return (
+        "Namaste! I'm FARKA. I help Nepali workers abroad see what is realistically possible back in Nepal, "
+        "whether that means a job or a small business. First, where are you right now?"
+    )
 
 
-def _stage_goal(stage: str) -> str:
-    return {
-        "language_set": "Ask where they are now and what work they did abroad. Be warm and curious.",
-        "collecting_basics": "Extract current_location and trade_category. Ask about years of experience.",
-        "collecting_experience": "Extract years_experience. Ask if they want a job or to start a business.",
-        "path_decision": "Determine if they want job_seeker or business_starter path. Set profile.path.",
-        "collecting_skills": "Show skill tag suggestions for their trade from the canonical skill tags list. Ask them to confirm which apply to them. Extract confirmed skills as a list.",
-        "collecting_business_details": "Ask which district they want to return to, their savings range, and their specific business idea. Be encouraging.",
-        "profile_complete": "Tell them their profile is ready. Say you are now searching or generating. Set redirect.",
-    }.get(stage, "Keep the conversation moving helpfully.")
+def process_message(session: ChatSession, user_message: str) -> dict[str, Any]:
+    stage = _enum_value(session.workflow_stage)
+    language = _enum_value(session.language) or "en"
+
+    if not client:
+        return _fallback_process(session, user_message)
+
+    last_messages = json.dumps((session.messages or [])[-4:], ensure_ascii=False)
+    prompt = f"""
+You are FARKA, a friendly and practical return-migration advisor for Nepali workers abroad.
+{get_language_instruction(language)}
+Current workflow stage: {stage}
+Conversation so far: {last_messages}
+
+Behavior rules:
+- Sound warm, practical, and trustworthy.
+- Ask only the next most useful question.
+- Keep replies concise and natural, like a real product assistant.
+- Use Nepal-specific context when helpful.
+- For job seekers, keep skill tags in English internally.
+
+Stage instructions:
+- language_set: confirm their location and ask what type of work they did abroad.
+- collecting_basics: identify name if provided, current_location, and trade_category. Then ask years of experience.
+- collecting_experience: identify years_experience, then ask whether they want a job or want to start a business in Nepal.
+- path_decision: set path to job_seeker or business_starter.
+- collecting_skills: identify skills from the user's answer and confirm you are moving to job matching.
+- collecting_business_details: identify district_target, savings_range, has_savings, and business idea text. Then confirm you are generating a checklist.
+
+At the very end, output one JSON block inside <extract></extract>.
+Use this exact shape:
+<extract>{{
+  "name": null,
+  "current_location": null,
+  "trade_category": null,
+  "years_experience": null,
+  "path": null,
+  "skills": [],
+  "district_target": null,
+  "savings_range": null,
+  "has_savings": null,
+  "next_stage": "{stage}",
+  "redirect": null
+}}</extract>
+
+Allowed enum values:
+- trade_category: construction, hospitality, manufacturing, agriculture, domestic, transport, tech, other
+- path: job_seeker, business_starter, undecided
+- savings_range: under_5L, 5L_to_20L, 20L_to_50L, above_50L
+- redirect: null, jobs, checklist
+""".strip()
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.25,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+            content = response.choices[0].message.content or ""
+            reply, extracted = _parse_extract(content)
+            clean = _normalize_extracted_data(extracted, session)
+            if not reply:
+                reply = _fallback_process(session, user_message)["reply"]
+            return {
+                "reply": reply,
+                "extracted_data": clean["fields"],
+                "next_stage": clean["next_stage"],
+                "redirect": clean["redirect"],
+            }
+        except Exception:
+            continue
+
+    return _fallback_process(session, user_message)
 
 
-def _safe_json_loads(text: str) -> dict[str, Any]:
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
+def generate_checklist(profile: Profile) -> dict[str, Any]:
+    language = _enum_value(profile.language_pref) or "en"
+    trade = _enum_value(profile.trade_category) or "other"
+    district = profile.district_target or "Kathmandu"
+    savings = _enum_value(profile.savings_range) or "under_5L"
+    business_idea = ", ".join(profile.skills or []) or trade
+
+    if not client:
+        items = _generic_checklist(trade, district)
+        return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
+
+    system_prompt = f"""
+You are a Nepal-focused small business advisor.
+{get_language_instruction(language)}
+Generate a grounded 8-week launch checklist for a returning Nepali migrant worker.
+Be realistic, specific, and action-oriented.
+Output ONLY valid JSON.
+""".strip()
+
+    user_prompt = (
+        f"Profile: trade={trade}, district={district}, savings={savings}, business idea={business_idea}. "
+        "Return a JSON array only. Each item must be {category: str, week: int, task: str, done: false}. "
+        "Use categories from Legal & Registration, Finance & Loans, Location & Equipment, Marketing, Operations."
+    )
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            raw = response.choices[0].message.content or "[]"
+            items = _validate_checklist_items(json.loads(raw))
+            if not items:
+                raise ValueError("Empty checklist")
+            return {"checklist_items": items, "raw_ai_output": raw}
+        except Exception:
+            continue
+
+    items = _generic_checklist(trade, district)
+    return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
+
+
+def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
+    stage = _enum_value(session.workflow_stage)
+    language = _enum_value(session.language) or "en"
+    text = user_message.strip()
+    lower = text.lower()
+    extracted: dict[str, Any] = {}
+    next_stage = stage
+    redirect = None
+
+    if stage == "language_set":
+        extracted["current_location"] = text
+        next_stage = "collecting_basics"
+        reply = _respond(
+            language,
+            "Thank you. Which work area best fits what you did abroad? For example: construction, hospitality, transport, agriculture, manufacturing, domestic work, or tech.",
+            "धन्यवाद। विदेशमा तपाईंले गरेको काम कुन क्षेत्रमा पर्छ? जस्तै निर्माण, हस्पिटालिटी, यातायात, कृषि, उत्पादन, घरेलु काम, वा टेक।",
+        )
+    elif stage == "collecting_basics":
+        extracted.update(_extract_basics(text))
+        next_stage = "collecting_experience"
+        reply = _respond(
+            language,
+            "How many years of experience do you have in that work?",
+            "त्यो काममा तपाईंको कति वर्षको अनुभव छ?",
+        )
+    elif stage == "collecting_experience":
+        extracted["years_experience"] = _extract_years(lower)
+        next_stage = "path_decision"
+        reply = _respond(
+            language,
+            "When you return to Nepal, would you prefer a job or your own business?",
+            "नेपाल फर्केपछि तपाईं जागिर चाहनुहुन्छ कि आफ्नै व्यवसाय?",
+        )
+    elif stage == "path_decision":
+        extracted["path"] = "business_starter" if any(token in lower for token in ["business", "व्यवसाय"]) else "job_seeker"
+        if extracted["path"] == "job_seeker":
+            next_stage = "collecting_skills"
+            trade = _infer_trade_from_session(session.messages)
+            suggestions = ", ".join(SKILL_TAGS.get(trade, SKILL_TAGS["construction"])[:6])
+            reply = _respond(
+                language,
+                f"Great. Which of these skills match you: {suggestions}? You can add your own too.",
+                f"राम्रो। यी सीपमध्ये कुन-कुन तपाईंलाई मिल्छ: {suggestions}? आफ्नै सीप पनि थप्न सक्नुहुन्छ।",
+            )
+        else:
+            next_stage = "collecting_business_details"
+            districts = ", ".join(DISTRICT_CHOICES[:4])
+            reply = _respond(
+                language,
+                f"Great. Which district do you want to return to, how much do you have in savings, and what business idea do you have? Common districts: {districts}.",
+                f"राम्रो। तपाईं कुन जिल्लामा फर्किन चाहनुहुन्छ, कति बचत छ, र कस्तो व्यवसायको योजना छ? सामान्य जिल्ला उदाहरण: {districts}।",
+            )
+    elif stage == "collecting_skills":
+        extracted["skills"] = _extract_skills(text, _infer_trade_from_session(session.messages))
+        next_stage = "job_matching"
+        redirect = "jobs"
+        reply = _respond(
+            language,
+            "Your profile is ready. I am now matching you to jobs in Nepal.",
+            "तपाईंको प्रोफाइल तयार भयो। अब नेपालमा तपाईंलाई मिल्ने जागिर खोज्दैछु।",
+        )
+    elif stage == "collecting_business_details":
+        extracted.update(_extract_business_details(text))
+        next_stage = "checklist_generated"
+        redirect = "checklist"
+        reply = _respond(
+            language,
+            "Your profile is ready. I am now preparing your business roadmap.",
+            "तपाईंको प्रोफाइल तयार भयो। अब तपाईंको व्यवसाय रोडम्याप तयार गर्दैछु।",
+        )
+    else:
+        reply = _respond(language, "Thanks. Tell me a bit more.", "धन्यवाद। अलि थप जानकारी दिनुस्।")
+
+    return {"reply": reply, "extracted_data": extracted, "next_stage": next_stage, "redirect": redirect}
 
 
 def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
@@ -78,180 +261,54 @@ def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
         return response_text.strip(), {}
     extract_text = match.group(1).strip()
     reply = EXTRACT_PATTERN.sub("", response_text).strip()
-    return reply, _safe_json_loads(extract_text)
+    try:
+        return reply, json.loads(extract_text)
+    except Exception:
+        return reply, {}
 
 
-def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
-    stage = session.workflow_stage.value if hasattr(session.workflow_stage, "value") else str(session.workflow_stage)
-    text = user_message.strip()
-    lower = text.lower()
-    extracted: dict[str, Any] = {}
-    reply = "Thanks. Tell me a bit more."
-    next_stage = stage
-    redirect = None
+def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -> dict[str, Any]:
+    stage = _enum_value(session.workflow_stage)
+    inferred_years = _infer_years_from_session(session.messages)
+    fields = {
+        "name": extracted.get("name"),
+        "current_location": extracted.get("current_location"),
+        "trade_category": _clean_trade(extracted.get("trade_category")) or _infer_trade_from_session(session.messages),
+        "years_experience": _coerce_years(extracted.get("years_experience")) or inferred_years,
+        "path": extracted.get("path") if extracted.get("path") in PATH_CHOICES or extracted.get("path") == "undecided" else None,
+        "skills": _coerce_skills(extracted.get("skills")),
+        "district_target": _clean_district(extracted.get("district_target")),
+        "savings_range": extracted.get("savings_range") if extracted.get("savings_range") in SAVINGS_CHOICES else None,
+        "has_savings": _coerce_bool(extracted.get("has_savings")),
+    }
+
+    next_stage = extracted.get("next_stage") or stage
+    redirect = extracted.get("redirect")
 
     if stage == "language_set":
-        extracted["current_location"] = text
-        extracted["trade_category"] = _infer_trade(lower)
         next_stage = "collecting_basics"
-        reply = _respond(
-            session.language,
-            "Thank you. What kind of work did you do abroad, and what is your name if you want to share it?",
-            "धन्यवाद। विदेशमा कस्तो काम गर्नुहुन्थ्यो, र चाहनुहुन्छ भने आफ्नो नाम पनि भन्नुस्।",
-        )
     elif stage == "collecting_basics":
-        extracted.update(_extract_basics(text))
-        if "trade_category" not in extracted:
-            extracted["trade_category"] = _infer_trade(lower)
-        next_stage = "collecting_experience"
-        reply = _respond(
-            session.language,
-            "How many years of experience do you have in this work?",
-            "यो काममा तपाईंको कति वर्षको अनुभव छ?",
-        )
+        next_stage = "path_decision" if fields["trade_category"] and fields["years_experience"] else "collecting_experience"
     elif stage == "collecting_experience":
-        extracted["years_experience"] = _extract_years(lower)
-        next_stage = "path_decision"
-        reply = _respond(
-            session.language,
-            "When you return to Nepal, do you want a job or do you want to start your own business?",
-            "नेपाल फर्केपछि तपाईं जागिर खोज्न चाहनुहुन्छ कि आफ्नै व्यवसाय सुरु गर्न चाहनुहुन्छ?",
-        )
-    elif stage == "path_decision":
-        extracted["path"] = "business_starter" if any(word in lower for word in ["business", "shop", "start my own", "व्यवसाय"]) else "job_seeker"
-        if extracted["path"] == "job_seeker":
+        if fields["path"] == "job_seeker":
             next_stage = "collecting_skills"
-            inferred_trade = _infer_trade_from_session(session.messages)
-            suggestions = SKILL_TAGS.get(inferred_trade, [])[:6]
-            if suggestions:
-                skill_text = ", ".join(suggestions)
-                reply = _respond(
-                    session.language,
-                    f"These skills are common for your trade: {skill_text}. Which of these match you? You can add your own too.",
-                    f"तपाईंको कामसँग मिल्ने सीपहरू यस्ता छन्: {skill_text}. यीमध्ये कुन-कुन तपाईंलाई मिल्छ? आफ्नै सीप पनि थप्न सक्नुहुन्छ।",
-                )
-            else:
-                reply = _respond(
-                    session.language,
-                    "Tell me the main skills you use in your work. You can list them one by one.",
-                    "तपाईंले आफ्नो काममा प्रयोग गर्ने मुख्य सीपहरू भन्नुस्। एक-एक गरेर सूची दिन सक्नुहुन्छ।",
-                )
-        else:
+        elif fields["path"] == "business_starter":
             next_stage = "collecting_business_details"
-            reply = _respond(
-                session.language,
-                "Which district do you want to return to, how much savings do you have, and what business do you want to start?",
-                "तपाईं कुन जिल्लामा फर्कन चाहनुहुन्छ, कति बचत छ, र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ?",
-            )
+        else:
+            next_stage = "path_decision"
+    elif stage == "path_decision":
+        if fields["path"] == "job_seeker":
+            next_stage = "collecting_skills"
+        elif fields["path"] == "business_starter":
+            next_stage = "collecting_business_details"
     elif stage == "collecting_skills":
-        inferred_trade = _infer_trade_from_session(session.messages)
-        extracted["skills"] = _extract_skills(text, inferred_trade)
         next_stage = "job_matching"
         redirect = "jobs"
-        reply = _respond(
-            session.language,
-            "Your profile is ready. I am now searching for jobs that match your skills.",
-            "तपाईंको प्रोफाइल तयार भयो। अब तपाईंको सीपसँग मिल्ने जागिर खोज्दैछु।",
-        )
     elif stage == "collecting_business_details":
-        extracted.update(_extract_business_details(text))
         next_stage = "checklist_generated"
         redirect = "checklist"
-        reply = _respond(
-            session.language,
-            "Your profile is ready. I am now building your business checklist.",
-            "तपाईंको प्रोफाइल तयार भयो। अब तपाईंको व्यवसाय चेकलिस्ट बनाउँदैछु।",
-        )
 
-    return {"reply": reply, "extracted_data": extracted, "next_stage": next_stage, "redirect": redirect}
-
-
-def process_message(session: ChatSession, user_message: str) -> dict[str, Any]:
-    stage = session.workflow_stage.value if hasattr(session.workflow_stage, "value") else str(session.workflow_stage)
-    language = session.language.value if hasattr(session.language, "value") else str(session.language)
-    language_instruction = get_language_instruction(language)
-    last_messages = json.dumps((session.messages or [])[-3:], ensure_ascii=False)
-
-    if not client:
-        return _fallback_process(session, user_message)
-
-    system_prompt = f"""
-You are FARKA, a friendly career and business advisor for Nepali migrant workers returning home.
-{language_instruction}
-Current workflow stage: {stage}
-Your goal at this stage: {_stage_goal(stage)}
-Conversation so far: {last_messages}
-
-IMPORTANT: At the end of your response, output a JSON block wrapped in <extract></extract> tags.
-This JSON must contain any data you extracted from the user's message.
-If nothing extracted, output: <extract>{{}}</extract>
-Also include "next_stage" and "redirect" (null or "jobs" or "checklist") in the extract block.
-""".strip()
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.3,
-        )
-        content = response.choices[0].message.content or ""
-        reply, extracted = _parse_extract(content)
-        next_stage = extracted.pop("next_stage", stage)
-        redirect = extracted.pop("redirect", None)
-        if not reply:
-            reply = _fallback_process(session, user_message)["reply"]
-        return {"reply": reply, "extracted_data": extracted, "next_stage": next_stage, "redirect": redirect}
-    except Exception:
-        return _fallback_process(session, user_message)
-
-
-def generate_checklist(profile: Profile) -> dict[str, Any]:
-    language = profile.language_pref.value if hasattr(profile.language_pref, "value") else str(profile.language_pref or "en")
-    trade = profile.trade_category.value if hasattr(profile.trade_category, "value") else str(profile.trade_category or "other")
-    district = profile.district_target or "Kathmandu"
-    savings = profile.savings_range.value if hasattr(profile.savings_range, "value") else str(profile.savings_range or "under_5L")
-    business_idea = ", ".join(profile.skills or []) or trade
-
-    if not client:
-        items = _generic_checklist(trade)
-        return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
-
-    system_prompt = f"""
-You are a business advisor for Nepal. Generate a realistic 8-week business launch checklist for a returning Nepali migrant worker.
-Be specific to Nepal. Output ONLY valid JSON.
-{get_language_instruction(language)}
-""".strip()
-    user_prompt = (
-        f"Worker profile: Trade={trade}, Target district={district}, Savings={savings}, "
-        f"Business idea: {business_idea}. "
-        "Generate checklist as JSON array: [{category: str, week: int, task: str, done: false}]. "
-        "Include categories: Legal & Registration, Finance & Loans, Location & Equipment, Marketing, Operations."
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-        )
-        raw = response.choices[0].message.content or "[]"
-        items = _validate_checklist_items(json.loads(raw))
-        if not isinstance(items, list) or not items:
-            raise ValueError("Invalid checklist output")
-        return {"checklist_items": items, "raw_ai_output": raw}
-    except Exception:
-        items = _generic_checklist(trade)
-        return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
-
-
-def _respond(language: str, en_text: str, ne_text: str) -> str:
-    return ne_text if language == "ne" else en_text
+    return {"fields": {k: v for k, v in fields.items() if v not in (None, [], "")}, "next_stage": next_stage, "redirect": redirect}
 
 
 def _infer_trade(text: str) -> str:
@@ -259,21 +316,6 @@ def _infer_trade(text: str) -> str:
         if any(keyword in text for keyword in keywords):
             return trade
     return "other"
-
-
-def _extract_basics(text: str) -> dict[str, Any]:
-    data: dict[str, Any] = {}
-    if "name is" in text.lower():
-        data["name"] = text.split("name is", 1)[1].strip().split(".")[0].title()
-    trade = _infer_trade(text.lower())
-    if trade != "other":
-        data["trade_category"] = trade
-    return data
-
-
-def _extract_years(text: str) -> int | None:
-    match = re.search(r"(\d+)", text)
-    return int(match.group(1)) if match else None
 
 
 def _infer_trade_from_session(messages: list[dict[str, Any]] | None) -> str:
@@ -285,44 +327,121 @@ def _infer_trade_from_session(messages: list[dict[str, Any]] | None) -> str:
     return _infer_trade(history)
 
 
+def _extract_basics(text: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    lowered = text.lower()
+    if "name is" in lowered:
+        data["name"] = text.split("name is", 1)[1].strip().split(".")[0].title()
+    trade = _infer_trade(lowered)
+    if trade != "other":
+        data["trade_category"] = trade
+    return data
+
+
+def _extract_years(text: str) -> int | None:
+    match = re.search(r"(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def _infer_years_from_session(messages: list[dict[str, Any]] | None) -> int | None:
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        years = _extract_years(message.get("content", ""))
+        if years is not None:
+            return years
+    return None
+
+
 def _extract_skills(text: str, trade: str) -> list[str]:
     canonical = SKILL_TAGS.get(trade, [])
     lowered = text.lower()
     matched = [skill for skill in canonical if skill.lower() in lowered]
     if matched:
         return matched
-    return canonical[:3]
+    if "," in text:
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return canonical[:4]
 
 
 def _extract_business_details(text: str) -> dict[str, Any]:
     lower = text.lower()
-    district = next((item for item in DISTRICTS if item.lower() in lower), None)
-    savings = next(
-        (key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)),
-        "under_5L",
-    )
+    district = next((item for item in DISTRICTS if item.lower() in lower), "Kathmandu")
+    savings = next((key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)), "under_5L")
     return {
-        "district_target": district or "Kathmandu",
+        "district_target": district,
         "savings_range": savings,
-        "has_savings": savings != "under_5L" or "saving" in lower or "बचत" in lower,
+        "has_savings": savings != "under_5L",
         "skills": [text.strip()],
     }
 
 
-def _generic_checklist(trade: str) -> list[dict[str, Any]]:
-    return _validate_checklist_items([
-        {"category": "Legal & Registration", "week": 1, "task": f"Choose a clear {trade} business name and confirm ward-level registration requirements.", "done": False},
-        {"category": "Legal & Registration", "week": 1, "task": "Visit the local municipality office to understand registration documents and tax setup.", "done": False},
-        {"category": "Finance & Loans", "week": 2, "task": "Estimate startup budget, monthly operating costs, and break-even target.", "done": False},
-        {"category": "Finance & Loans", "week": 2, "task": "Compare personal savings with cooperative, bank, or remittance-backed loan options.", "done": False},
-        {"category": "Location & Equipment", "week": 3, "task": "Shortlist two operating locations and compare rent, foot traffic, and access.", "done": False},
-        {"category": "Location & Equipment", "week": 4, "task": f"Prepare the essential tools and equipment needed for a small {trade} operation.", "done": False},
-        {"category": "Operations", "week": 5, "task": "Create a first-month supplier list and simple pricing sheet.", "done": False},
-        {"category": "Operations", "week": 6, "task": "Write daily operations steps, quality checks, and customer handling process.", "done": False},
-        {"category": "Marketing", "week": 7, "task": "Create a Facebook page, WhatsApp contact card, and local referral message.", "done": False},
-        {"category": "Marketing", "week": 8, "task": "Launch with an opening offer and ask first customers for referrals and testimonials.", "done": False},
-    ])
+def _generic_checklist(trade: str, district: str) -> list[dict[str, Any]]:
+    return _validate_checklist_items(
+        [
+            {"category": "Legal & Registration", "week": 1, "task": f"Confirm ward office registration steps for a {trade} business in {district}.", "done": False},
+            {"category": "Legal & Registration", "week": 1, "task": "Check whether PAN registration and local municipality approval are required.", "done": False},
+            {"category": "Finance & Loans", "week": 2, "task": "List startup budget, emergency reserve, and first 3 months of operating costs.", "done": False},
+            {"category": "Finance & Loans", "week": 2, "task": "Compare your savings with cooperative, bank, or remittance-backed loan options.", "done": False},
+            {"category": "Location & Equipment", "week": 3, "task": f"Shortlist two possible operating areas in or near {district}.", "done": False},
+            {"category": "Location & Equipment", "week": 4, "task": f"Prepare the basic tools and equipment required for your {trade} service.", "done": False},
+            {"category": "Operations", "week": 5, "task": "Create a supplier/contact list and simple daily operations checklist.", "done": False},
+            {"category": "Operations", "week": 6, "task": "Set simple pricing, quality standards, and customer follow-up steps.", "done": False},
+            {"category": "Marketing", "week": 7, "task": "Prepare a Facebook page, WhatsApp number, and referral message for your first customers.", "done": False},
+            {"category": "Marketing", "week": 8, "task": "Launch with a small opening offer and collect first customer feedback.", "done": False},
+        ]
+    )
 
 
 def _validate_checklist_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [ChecklistItem.model_validate(item).model_dump() for item in items]
+
+
+def _respond(language: str, en_text: str, ne_text: str) -> str:
+    return ne_text if language == "ne" else en_text
+
+
+def _enum_value(value: Any) -> str | None:
+    return value.value if hasattr(value, "value") else value
+
+
+def _coerce_years(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.search(r"(\d+)", str(value))
+    return int(match.group(1)) if match else None
+
+
+def _coerce_skills(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in {"true", "yes"}:
+            return True
+        if value.lower() in {"false", "no"}:
+            return False
+    return None
+
+
+def _clean_trade(value: Any) -> str | None:
+    if isinstance(value, str) and value in set(SKILL_TAGS) | {"other"}:
+        return value
+    return None
+
+
+def _clean_district(value: Any) -> str | None:
+    if isinstance(value, str):
+        for district in DISTRICTS:
+            if district.lower() == value.lower():
+                return district
+    return None

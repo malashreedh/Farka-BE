@@ -10,4 +10,3 @@ openai
 httpx
 requests
 python-dotenv
-pytest
