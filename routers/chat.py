@@ -9,7 +9,7 @@ from models import ChatSession, Profile
 from schemas import APIResponse, ChatMessageRequest, ChatMessageResponse, ChatStartResponse
 from services.ai_service import get_welcome_message, process_message
 from services.language_service import detect_language
-from services.profile_service import sanitize_profile_updates
+from services.profile_service import has_meaningful_profile_data, sanitize_profile_updates
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -50,7 +50,7 @@ def chat_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
     session.messages = list(session.messages or []) + [_chat_entry("assistant", result["reply"])]
 
     extracted_data = sanitize_profile_updates(result.get("extracted_data", {}))
-    if extracted_data:
+    if extracted_data and has_meaningful_profile_data(extracted_data):
         if session.profile_id:
             profile = db.query(Profile).filter(Profile.id == session.profile_id).first()
         else:

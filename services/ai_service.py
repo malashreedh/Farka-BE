@@ -181,6 +181,54 @@ def generate_checklist(profile) -> tuple:
         "the district, and the trade.\nOutput ONLY the JSON array."
     )
 
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            raw = response.choices[0].message.content or "[]"
+            items = _validate_checklist_items(json.loads(raw))
+            if not items:
+                raise ValueError("Empty checklist")
+            return {"checklist_items": items, "raw_ai_output": raw}
+        except Exception:
+            continue
+
+    items = _generic_checklist(trade, district)
+    return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
+
+
+def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
+    extracted = _normalize_extracted_data(_heuristic_extract(session, user_message), session)
+    language = _enum_value(session.language) or "en"
+    stage = _enum_value(session.workflow_stage)
+    reply = _compose_guided_reply(
+        language=language,
+        stage=stage,
+        next_stage=extracted["next_stage"],
+        fields=extracted["fields"],
+        session=session,
+        llm_reply=None,
+    )
+    return {
+        "reply": reply,
+        "extracted_data": extracted["fields"],
+        "next_stage": extracted["next_stage"],
+        "redirect": extracted["redirect"],
+    }
+
+
+def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
+    match = EXTRACT_PATTERN.search(response_text or "")
+    if not match:
+        return response_text.strip(), {}
+    extract_text = match.group(1).strip()
+    reply = EXTRACT_PATTERN.sub("", response_text).strip()
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
