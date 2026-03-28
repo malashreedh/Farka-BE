@@ -9,11 +9,17 @@ from seed_jobs import seed
 
 app = FastAPI(title="FARKA API")
 
-cors_origin = os.getenv("CORS_ORIGIN", "http://localhost:3000")
+
+def _get_cors_origins() -> list[str]:
+    raw_origins = os.getenv("CORS_ORIGINS") or os.getenv("CORS_ORIGIN") or "http://localhost:3000"
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
+cors_origins = _get_cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[cors_origin],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
