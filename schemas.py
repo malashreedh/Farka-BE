@@ -38,6 +38,12 @@ class ChatMessageResponse(BaseModel):
     redirect: Optional[str] = None
 
 
+class VoiceMessageResponse(ChatMessageResponse):
+    transcript: str
+    audio_base64: Optional[str] = None
+    audio_mime_type: str = "audio/mpeg"
+
+
 class AuthSessionRequest(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None

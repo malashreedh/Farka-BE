@@ -1,13 +1,14 @@
+import base64
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models import ChatSession, Profile
-from schemas import APIResponse, ChatMessageRequest, ChatMessageResponse, ChatStartResponse
-from services.ai_service import get_welcome_message, process_message
+from schemas import APIResponse, ChatMessageRequest, ChatMessageResponse, ChatStartResponse, VoiceMessageResponse
+from services.ai_service import get_welcome_message, process_message, synthesize_speech, transcribe_audio
 from services.language_service import detect_language
 from services.profile_service import has_meaningful_profile_data, sanitize_profile_updates
 
@@ -28,23 +29,18 @@ def start_chat(db: Session = Depends(get_db)):
     return {"data": {"session_id": session.id, "message": message, "stage": "initial"}}
 
 
-@router.post("/message", response_model=APIResponse[ChatMessageResponse])
-def chat_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
-    session = db.query(ChatSession).filter(ChatSession.id == payload.session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Chat session not found")
-
+def _run_chat_turn(session: ChatSession, content: str, db: Session) -> dict:
     messages = list(session.messages or [])
-    messages.append(_chat_entry("user", payload.content))
+    messages.append(_chat_entry("user", content))
     session.messages = messages
 
     current_stage = session.workflow_stage.value if hasattr(session.workflow_stage, "value") else str(session.workflow_stage)
     if current_stage == "initial":
-        language = detect_language(payload.content)
+        language = detect_language(content)
         session.language = language
         session.workflow_stage = "language_set"
 
-    result = process_message(session, payload.content)
+    result = process_message(session, content)
     session.workflow_stage = result["next_stage"]
     session.updated_at = datetime.now(UTC)
     session.messages = list(session.messages or []) + [_chat_entry("assistant", result["reply"])]
@@ -74,10 +70,45 @@ def chat_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
     db.refresh(session)
 
     return {
+        "message": result["reply"],
+        "stage": session.workflow_stage.value if hasattr(session.workflow_stage, "value") else str(session.workflow_stage),
+        "profile_id": session.profile_id,
+        "redirect": result.get("redirect"),
+    }
+
+
+@router.post("/message", response_model=APIResponse[ChatMessageResponse])
+def chat_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
+    session = db.query(ChatSession).filter(ChatSession.id == payload.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    return {"data": _run_chat_turn(session, payload.content, db)}
+
+
+@router.post("/voice-message", response_model=APIResponse[VoiceMessageResponse])
+def voice_message(
+    session_id: str = Form(...),
+    audio: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    transcript = transcribe_audio(audio.file)
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Could not transcribe audio")
+
+    result = _run_chat_turn(session, transcript, db)
+    language = session.language.value if hasattr(session.language, "value") else str(session.language or "en")
+    audio_bytes = synthesize_speech(result["message"], language)
+
+    return {
         "data": {
-            "message": result["reply"],
-            "stage": session.workflow_stage.value if hasattr(session.workflow_stage, "value") else str(session.workflow_stage),
-            "profile_id": session.profile_id,
-            "redirect": result.get("redirect"),
+            **result,
+            "transcript": transcript,
+            "audio_base64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
+            "audio_mime_type": "audio/mpeg",
         }
     }
