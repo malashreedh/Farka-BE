@@ -29,6 +29,18 @@ TRADE_KEYWORDS = {
     "tech": ["tech", "it", "developer", "computer", "digital", "support", "प्रविधि", "कम्प्युटर"],
 }
 
+STAGE_GOALS = {
+    "initial": "Greet warmly and ask where the user is currently working or living.",
+    "language_set": "Get the user's current location clearly before moving on.",
+    "collecting_basics": "Understand what type of work they did abroad and capture trade_category.",
+    "collecting_experience": "Find out their years of experience in that work.",
+    "path_decision": "Find out whether they want a job in Nepal or want to start a business.",
+    "collecting_skills": "Help the user confirm the skills they actually used most in their work.",
+    "collecting_business_details": "Collect district, savings range, and business idea needed for the checklist.",
+    "job_matching": "Confirm that job matching is underway.",
+    "checklist_generated": "Confirm that the business checklist is being prepared or is ready.",
+}
+
 DISTRICTS = ["Kathmandu", "Lalitpur", "Bhaktapur", "Pokhara", "Chitwan", "Biratnagar", "Butwal"]
 SMALL_TALK_PATTERNS = {
     "en": {"hi", "hello", "hey", "good morning", "good evening", "namaste", "yo", "start"},
@@ -64,50 +76,7 @@ def process_message(session: ChatSession, user_message: str) -> dict[str, Any]:
     if not client:
         return _fallback_process(session, user_message)
 
-    last_messages = json.dumps((session.messages or [])[-4:], ensure_ascii=False)
-    prompt = f"""
-You are FARKA, a friendly and practical return-migration advisor for Nepali workers abroad.
-{get_language_instruction(language)}
-Current workflow stage: {stage}
-Conversation so far: {last_messages}
-
-Behavior rules:
-- Sound warm, practical, and trustworthy.
-- Ask only the next most useful question.
-- Keep replies concise and natural, like a real product assistant.
-- Use Nepal-specific context when helpful.
-- For job seekers, keep skill tags in English internally.
-
-Stage instructions:
-- language_set: confirm their location and ask what type of work they did abroad.
-- collecting_basics: identify name if provided, current_location, and trade_category. Then ask years of experience.
-- collecting_experience: identify years_experience, then ask whether they want a job or want to start a business in Nepal.
-- path_decision: set path to job_seeker or business_starter.
-- collecting_skills: identify skills from the user's answer and confirm you are moving to job matching.
-- collecting_business_details: identify district_target, savings_range, has_savings, and business idea text. Then confirm you are generating a checklist.
-
-At the very end, output one JSON block inside <extract></extract>.
-Use this exact shape:
-<extract>{{
-  "name": null,
-  "current_location": null,
-  "trade_category": null,
-  "years_experience": null,
-  "path": null,
-  "skills": [],
-  "district_target": null,
-  "savings_range": null,
-  "has_savings": null,
-  "next_stage": "{stage}",
-  "redirect": null
-}}</extract>
-
-Allowed enum values:
-- trade_category: construction, hospitality, manufacturing, agriculture, domestic, transport, tech, other
-- path: job_seeker, business_starter, undecided
-- savings_range: under_5L, 5L_to_20L, 20L_to_50L, above_50L
-- redirect: null, jobs, checklist
-""".strip()
+    prompt = _build_system_prompt(stage, language, session)
 
     for model in FALLBACK_MODELS:
         try:
@@ -219,6 +188,57 @@ def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
         return reply, json.loads(extract_text)
     except Exception:
         return reply, {}
+
+
+def _build_system_prompt(stage: str, language: str, session: ChatSession) -> str:
+    last_messages = json.dumps((session.messages or [])[-6:], ensure_ascii=False)
+    trade_category = _enum_value(getattr(getattr(session, "profile", None), "trade_category", None))
+    skill_hint = ""
+    if stage == "collecting_skills" and trade_category in SKILL_TAGS:
+        skill_hint = (
+            f"\nSuggested canonical skill tags for {trade_category}: "
+            f"{json.dumps(SKILL_TAGS[trade_category], ensure_ascii=False)}"
+        )
+
+    return f"""
+You are FARKA, a friendly and practical return-migration advisor for Nepali workers abroad.
+{get_language_instruction(language)}
+Current workflow stage: {stage}
+Your goal at this stage: {STAGE_GOALS.get(stage, "Continue the conversation helpfully and extract only what is actually known.")}.
+Conversation so far: {last_messages}
+{skill_hint}
+
+Behavior rules:
+- Sound warm, practical, and trustworthy.
+- Ask only the next most useful question.
+- Keep replies concise and natural, like a real product assistant.
+- Use Nepal-specific context when helpful.
+- Only advance the stage when the required information has actually been collected.
+- If the user gives multiple useful facts in one message, use all of them.
+- For job seekers, keep skill tags in English internally.
+
+At the very end, output one JSON block inside <extract></extract>.
+Use this exact shape:
+<extract>{{
+  "name": null,
+  "current_location": null,
+  "trade_category": null,
+  "years_experience": null,
+  "path": null,
+  "skills": [],
+  "district_target": null,
+  "savings_range": null,
+  "has_savings": null,
+  "next_stage": "{stage}",
+  "redirect": null
+}}</extract>
+
+Allowed enum values:
+- trade_category: construction, hospitality, manufacturing, agriculture, domestic, transport, tech, other
+- path: job_seeker, business_starter, undecided
+- savings_range: under_5L, 5L_to_20L, 20L_to_50L, above_50L
+- redirect: null, jobs, checklist
+""".strip()
 
 
 def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -> dict[str, Any]:
