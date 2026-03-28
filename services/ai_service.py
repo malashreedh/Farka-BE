@@ -335,7 +335,8 @@ def _infer_current_location_from_messages(messages: list[dict[str, Any]] | None)
     for message in reversed(messages or []):
         if message.get("role") != "user":
             continue
-        location = _extract_current_location(message.get("content", ""))
+        content = message.get("content", "")
+        location = _extract_current_location(content) or _normalize_freeform_location(content)
         if location:
             return location
     return None
@@ -388,8 +389,12 @@ def _extract_business_details(text: str) -> dict[str, Any]:
 def _heuristic_extract(session: ChatSession, user_message: str) -> dict[str, Any]:
     trade = _infer_trade(user_message.lower())
     path = _infer_path_from_messages([{"role": "user", "content": user_message}])
+    stage = _enum_value(session.workflow_stage)
+    direct_location = _extract_current_location(user_message)
+    if not direct_location and stage in {"initial", "language_set"} and not _is_small_talk_text(user_message):
+        direct_location = _normalize_freeform_location(user_message)
     extracted: dict[str, Any] = {
-        "current_location": _extract_current_location(user_message),
+        "current_location": direct_location,
         "trade_category": None if trade == "other" else trade,
         "years_experience": _extract_years(user_message),
         "path": path,
@@ -612,12 +617,37 @@ def _is_small_talk_message(messages: list[dict[str, Any]] | None) -> bool:
         if message.get("role") != "user":
             continue
         raw = message.get("content", "").strip()
-        lowered = raw.lower()
-        if not raw:
-            return False
-        if lowered in SMALL_TALK_PATTERNS["en"] or raw in SMALL_TALK_PATTERNS["ne"]:
-            return True
-        if len(lowered.split()) <= 2 and lowered in {"hi", "hello", "hey", "namaste"}:
-            return True
-        return False
+        return _is_small_talk_text(raw)
     return False
+
+
+def _is_small_talk_text(text: str) -> bool:
+    raw = text.strip()
+    lowered = raw.lower()
+    if not raw:
+        return False
+    if lowered in SMALL_TALK_PATTERNS["en"] or raw in SMALL_TALK_PATTERNS["ne"]:
+        return True
+    if len(lowered.split()) <= 2 and lowered in {"hi", "hello", "hey", "namaste"}:
+        return True
+    return False
+
+
+def _normalize_freeform_location(text: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", text.strip(" .,"))
+    if not cleaned:
+        return None
+    if len(cleaned) > 40:
+        return None
+    if re.search(r"\d", cleaned):
+        return None
+    if any(token in cleaned.lower() for token in ["job", "business", "years", "worked", "experience", "skill"]):
+        return None
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    normalized_parts = []
+    for part in parts:
+        if part.isupper() and len(part) <= 4:
+            normalized_parts.append(part)
+        else:
+            normalized_parts.append(part.title())
+    return ", ".join(normalized_parts) if normalized_parts else None
