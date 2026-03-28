@@ -5,3 +5,4 @@ __pycache__/
 venv/
 *.pyc
 farka_dev.db
+test_farka.db

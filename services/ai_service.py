@@ -118,8 +118,14 @@ Allowed enum values:
             content = response.choices[0].message.content or ""
             reply, extracted = _parse_extract(content)
             clean = _normalize_extracted_data(extracted, session)
-            if not reply:
-                reply = _fallback_process(session, user_message)["reply"]
+            reply = _compose_guided_reply(
+                language=language,
+                stage=stage,
+                next_stage=clean["next_stage"],
+                fields=clean["fields"],
+                session=session,
+                llm_reply=reply,
+            )
             return {
                 "reply": reply,
                 "extracted_data": clean["fields"],
@@ -180,79 +186,23 @@ Output ONLY valid JSON.
 
 
 def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
-    stage = _enum_value(session.workflow_stage)
+    extracted = _normalize_extracted_data(_heuristic_extract(session, user_message), session)
     language = _enum_value(session.language) or "en"
-    text = user_message.strip()
-    lower = text.lower()
-    extracted: dict[str, Any] = {}
-    next_stage = stage
-    redirect = None
-
-    if stage == "language_set":
-        extracted["current_location"] = text
-        next_stage = "collecting_basics"
-        reply = _respond(
-            language,
-            "Thank you. Which work area best fits what you did abroad? For example: construction, hospitality, transport, agriculture, manufacturing, domestic work, or tech.",
-            "धन्यवाद। विदेशमा तपाईंले गरेको काम कुन क्षेत्रमा पर्छ? जस्तै निर्माण, हस्पिटालिटी, यातायात, कृषि, उत्पादन, घरेलु काम, वा टेक।",
-        )
-    elif stage == "collecting_basics":
-        extracted.update(_extract_basics(text))
-        next_stage = "collecting_experience"
-        reply = _respond(
-            language,
-            "How many years of experience do you have in that work?",
-            "त्यो काममा तपाईंको कति वर्षको अनुभव छ?",
-        )
-    elif stage == "collecting_experience":
-        extracted["years_experience"] = _extract_years(lower)
-        next_stage = "path_decision"
-        reply = _respond(
-            language,
-            "When you return to Nepal, would you prefer a job or your own business?",
-            "नेपाल फर्केपछि तपाईं जागिर चाहनुहुन्छ कि आफ्नै व्यवसाय?",
-        )
-    elif stage == "path_decision":
-        extracted["path"] = "business_starter" if any(token in lower for token in ["business", "व्यवसाय"]) else "job_seeker"
-        if extracted["path"] == "job_seeker":
-            next_stage = "collecting_skills"
-            trade = _infer_trade_from_session(session.messages)
-            suggestions = ", ".join(SKILL_TAGS.get(trade, SKILL_TAGS["construction"])[:6])
-            reply = _respond(
-                language,
-                f"Great. Which of these skills match you: {suggestions}? You can add your own too.",
-                f"राम्रो। यी सीपमध्ये कुन-कुन तपाईंलाई मिल्छ: {suggestions}? आफ्नै सीप पनि थप्न सक्नुहुन्छ।",
-            )
-        else:
-            next_stage = "collecting_business_details"
-            districts = ", ".join(DISTRICT_CHOICES[:4])
-            reply = _respond(
-                language,
-                f"Great. Which district do you want to return to, how much do you have in savings, and what business idea do you have? Common districts: {districts}.",
-                f"राम्रो। तपाईं कुन जिल्लामा फर्किन चाहनुहुन्छ, कति बचत छ, र कस्तो व्यवसायको योजना छ? सामान्य जिल्ला उदाहरण: {districts}।",
-            )
-    elif stage == "collecting_skills":
-        extracted["skills"] = _extract_skills(text, _infer_trade_from_session(session.messages))
-        next_stage = "job_matching"
-        redirect = "jobs"
-        reply = _respond(
-            language,
-            "Your profile is ready. I am now matching you to jobs in Nepal.",
-            "तपाईंको प्रोफाइल तयार भयो। अब नेपालमा तपाईंलाई मिल्ने जागिर खोज्दैछु।",
-        )
-    elif stage == "collecting_business_details":
-        extracted.update(_extract_business_details(text))
-        next_stage = "checklist_generated"
-        redirect = "checklist"
-        reply = _respond(
-            language,
-            "Your profile is ready. I am now preparing your business roadmap.",
-            "तपाईंको प्रोफाइल तयार भयो। अब तपाईंको व्यवसाय रोडम्याप तयार गर्दैछु।",
-        )
-    else:
-        reply = _respond(language, "Thanks. Tell me a bit more.", "धन्यवाद। अलि थप जानकारी दिनुस्।")
-
-    return {"reply": reply, "extracted_data": extracted, "next_stage": next_stage, "redirect": redirect}
+    stage = _enum_value(session.workflow_stage)
+    reply = _compose_guided_reply(
+        language=language,
+        stage=stage,
+        next_stage=extracted["next_stage"],
+        fields=extracted["fields"],
+        session=session,
+        llm_reply=None,
+    )
+    return {
+        "reply": reply,
+        "extracted_data": extracted["fields"],
+        "next_stage": extracted["next_stage"],
+        "redirect": extracted["redirect"],
+    }
 
 
 def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
@@ -269,44 +219,40 @@ def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
 
 def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -> dict[str, Any]:
     stage = _enum_value(session.workflow_stage)
+    profile = getattr(session, "profile", None)
     inferred_years = _infer_years_from_session(session.messages)
+    inferred_path = _infer_path_from_messages(session.messages)
+    inferred_trade = _infer_trade_from_session(session.messages)
+    inferred_district = _infer_district_from_messages(session.messages)
+    inferred_savings = _infer_savings_from_messages(session.messages)
+    inferred_location = _infer_current_location_from_messages(session.messages)
+    inferred_skills = _infer_skills_from_messages(
+        session.messages,
+        _clean_trade(extracted.get("trade_category")) or _enum_value(getattr(profile, "trade_category", None)) or inferred_trade,
+    )
     fields = {
-        "name": extracted.get("name"),
-        "current_location": extracted.get("current_location"),
-        "trade_category": _clean_trade(extracted.get("trade_category")) or _infer_trade_from_session(session.messages),
-        "years_experience": _coerce_years(extracted.get("years_experience")) or inferred_years,
-        "path": extracted.get("path") if extracted.get("path") in PATH_CHOICES or extracted.get("path") == "undecided" else None,
-        "skills": _coerce_skills(extracted.get("skills")),
-        "district_target": _clean_district(extracted.get("district_target")),
-        "savings_range": extracted.get("savings_range") if extracted.get("savings_range") in SAVINGS_CHOICES else None,
+        "name": extracted.get("name") or getattr(profile, "name", None),
+        "current_location": extracted.get("current_location") or getattr(profile, "current_location", None) or inferred_location,
+        "trade_category": _clean_trade(extracted.get("trade_category")) or _enum_value(getattr(profile, "trade_category", None)) or inferred_trade,
+        "years_experience": _coerce_years(extracted.get("years_experience")) or getattr(profile, "years_experience", None) or inferred_years,
+        "path": (
+            extracted.get("path")
+            if extracted.get("path") in PATH_CHOICES or extracted.get("path") == "undecided"
+            else _enum_value(getattr(profile, "path", None)) or inferred_path
+        ),
+        "skills": _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills,
+        "district_target": _clean_district(extracted.get("district_target")) or getattr(profile, "district_target", None) or inferred_district,
+        "savings_range": (
+            extracted.get("savings_range")
+            if extracted.get("savings_range") in SAVINGS_CHOICES
+            else _enum_value(getattr(profile, "savings_range", None)) or inferred_savings
+        ),
         "has_savings": _coerce_bool(extracted.get("has_savings")),
     }
+    if fields["has_savings"] is None and fields["savings_range"] is not None:
+        fields["has_savings"] = fields["savings_range"] != "under_5L"
 
-    next_stage = extracted.get("next_stage") or stage
-    redirect = extracted.get("redirect")
-
-    if stage == "language_set":
-        next_stage = "collecting_basics"
-    elif stage == "collecting_basics":
-        next_stage = "path_decision" if fields["trade_category"] and fields["years_experience"] else "collecting_experience"
-    elif stage == "collecting_experience":
-        if fields["path"] == "job_seeker":
-            next_stage = "collecting_skills"
-        elif fields["path"] == "business_starter":
-            next_stage = "collecting_business_details"
-        else:
-            next_stage = "path_decision"
-    elif stage == "path_decision":
-        if fields["path"] == "job_seeker":
-            next_stage = "collecting_skills"
-        elif fields["path"] == "business_starter":
-            next_stage = "collecting_business_details"
-    elif stage == "collecting_skills":
-        next_stage = "job_matching"
-        redirect = "jobs"
-    elif stage == "collecting_business_details":
-        next_stage = "checklist_generated"
-        redirect = "checklist"
+    next_stage, redirect = _resolve_progress(stage, fields, extracted.get("redirect"))
 
     return {"fields": {k: v for k, v in fields.items() if v not in (None, [], "")}, "next_stage": next_stage, "redirect": redirect}
 
@@ -353,6 +299,59 @@ def _infer_years_from_session(messages: list[dict[str, Any]] | None) -> int | No
     return None
 
 
+def _infer_path_from_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    history = " ".join(
+        message.get("content", "")
+        for message in (messages or [])
+        if message.get("role") == "user"
+    ).lower()
+    if any(token in history for token in ["business", "own business", "shop", "startup", "व्यवसाय", "पसल"]):
+        return "business_starter"
+    if any(token in history for token in ["job", "employment", "find work", "jagir", "जागिर"]):
+        return "job_seeker"
+    return None
+
+
+def _infer_district_from_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    history = " ".join(
+        message.get("content", "")
+        for message in (messages or [])
+        if message.get("role") == "user"
+    )
+    return _clean_district(history)
+
+
+def _infer_current_location_from_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        location = _extract_current_location(message.get("content", ""))
+        if location:
+            return location
+    return None
+
+
+def _infer_savings_from_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    history = " ".join(
+        message.get("content", "")
+        for message in (messages or [])
+        if message.get("role") == "user"
+    ).lower()
+    for key, tokens in SAVINGS_MAP.items():
+        if any(token in history for token in tokens):
+            return key
+    return None
+
+
+def _infer_skills_from_messages(messages: list[dict[str, Any]] | None, trade: str | None) -> list[str]:
+    history = " ".join(
+        message.get("content", "")
+        for message in (messages or [])
+        if message.get("role") == "user"
+    )
+    return _extract_skills(history, trade or "other")
+
+
 def _extract_skills(text: str, trade: str) -> list[str]:
     canonical = SKILL_TAGS.get(trade, [])
     lowered = text.lower()
@@ -374,6 +373,106 @@ def _extract_business_details(text: str) -> dict[str, Any]:
         "has_savings": savings != "under_5L",
         "skills": [text.strip()],
     }
+
+
+def _heuristic_extract(session: ChatSession, user_message: str) -> dict[str, Any]:
+    trade = _infer_trade(user_message.lower())
+    path = _infer_path_from_messages([{"role": "user", "content": user_message}])
+    extracted: dict[str, Any] = {
+        "current_location": _extract_current_location(user_message),
+        "trade_category": None if trade == "other" else trade,
+        "years_experience": _extract_years(user_message),
+        "path": path,
+        "skills": _extract_skills(user_message, trade if trade != "other" else _infer_trade_from_session(session.messages)),
+    }
+    extracted.update(_extract_business_details(user_message) if path == "business_starter" else {})
+    return extracted
+
+
+def _resolve_progress(stage: str, fields: dict[str, Any], redirect_hint: str | None) -> tuple[str, str | None]:
+    redirect = redirect_hint
+    has_basics = bool(fields["current_location"] and fields["trade_category"])
+    has_experience = fields["years_experience"] is not None
+    has_path = fields["path"] in {"job_seeker", "business_starter"}
+    has_skills = bool(fields["skills"])
+    has_business_details = bool(fields["district_target"] and fields["savings_range"])
+
+    if has_path and fields["path"] == "job_seeker" and has_skills:
+        return "job_matching", "jobs"
+    if has_path and fields["path"] == "business_starter" and has_business_details:
+        return "checklist_generated", "checklist"
+
+    if not has_basics:
+        return ("collecting_basics" if stage != "language_set" else "collecting_basics"), redirect
+    if not has_experience:
+        return "collecting_experience", redirect
+    if not has_path:
+        return "path_decision", redirect
+    if fields["path"] == "job_seeker":
+        return "collecting_skills", redirect
+    return "collecting_business_details", redirect
+
+
+def _compose_guided_reply(
+    language: str,
+    stage: str,
+    next_stage: str,
+    fields: dict[str, Any],
+    session: ChatSession,
+    llm_reply: str | None,
+) -> str:
+    llm_reply = (llm_reply or "").strip()
+    if next_stage == "collecting_basics":
+        if not fields.get("current_location"):
+            return _respond(language, "Thanks. Which country or city are you working in right now?", "धन्यवाद। तपाईं अहिले कुन देश वा सहरमा काम गर्दै हुनुहुन्छ?")
+        domain_examples = ", ".join(workflow["key"] for workflow in COMMON_DOMAIN_WORKFLOWS)
+        return _respond(
+            language,
+            f"Thank you. What type of work did you do abroad? Common areas are {domain_examples}.",
+            "धन्यवाद। विदेशमा तपाईंले कस्तो काम गर्नुभयो? सामान्य क्षेत्रहरू निर्माण, हस्पिटालिटी, फ्याक्ट्री, कृषि, यातायात र घरेलु हेरचाह हुन्।",
+        )
+    if next_stage == "collecting_experience":
+        trade_label = fields.get("trade_category", "that field")
+        return _respond(
+            language,
+            f"Understood. About how many years of experience do you have in {trade_label}?",
+            f"बुझें। {trade_label} क्षेत्रमा तपाईंको करिब कति वर्षको अनुभव छ?",
+        )
+    if next_stage == "path_decision":
+        return _respond(
+            language,
+            "When you return to Nepal, do you want me to help you find a job or build a small business plan?",
+            "नेपाल फर्केपछि तपाईंलाई जागिर खोज्न सहयोग चाहिन्छ कि सानो व्यवसायको योजना बनाउन?",
+        )
+    if next_stage == "collecting_skills":
+        trade = fields.get("trade_category") or _infer_trade_from_session(session.messages)
+        suggestions = ", ".join(SKILL_TAGS.get(trade, SKILL_TAGS["construction"])[:6])
+        return _respond(
+            language,
+            f"Great. To match the right jobs, tell me the skills you actually used most. You can pick from: {suggestions}.",
+            f"राम्रो। मिल्दो जागिर छान्न, तपाईंले सबैभन्दा धेरै प्रयोग गरेका सीप भन्नुस्। उदाहरण: {suggestions}।",
+        )
+    if next_stage == "collecting_business_details":
+        districts = ", ".join(DISTRICT_CHOICES[:4])
+        savings = ", ".join(SAVINGS_CHOICES)
+        return _respond(
+            language,
+            f"Good choice. Tell me your target district, rough savings band ({savings}), and what business you want to start. Common districts: {districts}.",
+            f"राम्रो छनोट। तपाईं फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ भन्नुस्। उदाहरण जिल्ला: {districts}।",
+        )
+    if next_stage == "job_matching":
+        return _respond(
+            language,
+            "Your profile looks complete. I’m matching you with Nepal-based roles now.",
+            "तपाईंको प्रोफाइल पूरा भयो। अब नेपालका मिल्दो भूमिकासँग म्याच गर्दैछु।",
+        )
+    if next_stage == "checklist_generated":
+        return _respond(
+            language,
+            "Your profile is ready. I’m preparing a practical Nepal business checklist now.",
+            "तपाईंको प्रोफाइल तयार भयो। अब नेपालका लागि व्यवहारिक व्यवसाय चेकलिस्ट तयार गर्दैछु।",
+        )
+    return llm_reply or _respond(language, "Thanks. Tell me a bit more so I can guide you properly.", "धन्यवाद। म तपाईंलाई राम्रोसँग मार्गदर्शन गर्न अझै अलि जानकारी दिनुस्।")
 
 
 def _generic_checklist(trade: str, district: str) -> list[dict[str, Any]]:
@@ -442,6 +541,33 @@ def _clean_trade(value: Any) -> str | None:
 def _clean_district(value: Any) -> str | None:
     if isinstance(value, str):
         for district in DISTRICTS:
-            if district.lower() == value.lower():
+            if district.lower() in value.lower():
                 return district
+    return None
+
+
+def _extract_current_location(text: str) -> str | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    patterns = [
+        r"\bi am in ([A-Za-z ]+?)(?:[,.]| and|$)",
+        r"\bi'm in ([A-Za-z ]+?)(?:[,.]| and|$)",
+        r"\bworking in ([A-Za-z ]+?)(?:[,.]| and|$)",
+        r"\bfrom ([A-Za-z ]+?)(?:[,.]| and|$)",
+        r"अहिले\s+([^\s।,.]+)\s*मा\s*छु",
+        r"म\s+([^\s।,.]+)\s*मा\s*छु",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, stripped, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip(" .,")
+            return candidate.title() if re.search(r"[A-Za-z]", candidate) else candidate
+
+    simple_locations = ["Qatar", "Dubai", "Doha", "Saudi Arabia", "Kuwait", "Malaysia", "Abu Dhabi", "Oman"]
+    lowered = stripped.lower()
+    for location in simple_locations:
+        if location.lower() in lowered:
+            return location
     return None
