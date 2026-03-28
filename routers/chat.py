@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 def _chat_entry(role: str, content: str) -> dict:
-    return {"role": role, "content": content, "timestamp": datetime.utcnow().isoformat()}
+    return {"role": role, "content": content, "timestamp": datetime.now(UTC).isoformat()}
 
 
 @router.post("/start", response_model=APIResponse[ChatStartResponse])
@@ -46,7 +46,7 @@ def chat_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
 
     result = process_message(session, payload.content)
     session.workflow_stage = result["next_stage"]
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(UTC)
     session.messages = list(session.messages or []) + [_chat_entry("assistant", result["reply"])]
 
     extracted_data = sanitize_profile_updates(result.get("extracted_data", {}))

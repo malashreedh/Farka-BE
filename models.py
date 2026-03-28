@@ -1,11 +1,15 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import JSON, Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from database import Base
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class PathEnum(str, enum.Enum):
@@ -77,7 +81,7 @@ class Profile(Base):
     district_target = Column(String, nullable=True)
     has_savings = Column(Boolean, nullable=False, default=False)
     savings_range = Column(Enum(SavingsRangeEnum), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     chat_sessions = relationship("ChatSession", back_populates="profile")
     job_matches = relationship("JobMatch", back_populates="profile")
@@ -92,8 +96,8 @@ class ChatSession(Base):
     messages = Column(JSON, nullable=False, default=list)
     workflow_stage = Column(Enum(WorkflowStageEnum), nullable=False, default=WorkflowStageEnum.initial)
     language = Column(Enum(LanguageEnum), nullable=False, default=LanguageEnum.en)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     profile = relationship("Profile", back_populates="chat_sessions")
 
@@ -113,7 +117,7 @@ class Job(Base):
     salary_range = Column(String, nullable=True)
     apply_url = Column(String, nullable=False, default="#")
     is_active = Column(Boolean, nullable=False, default=True)
-    posted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    posted_at = Column(DateTime, default=utc_now, nullable=False)
 
     job_matches = relationship("JobMatch", back_populates="job")
 
@@ -126,7 +130,7 @@ class JobMatch(Base):
     job_id = Column(String, ForeignKey("jobs.id"), nullable=False)
     match_score = Column(Float, nullable=False)
     matched_tags = Column(JSON, nullable=False, default=list)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     profile = relationship("Profile", back_populates="job_matches")
     job = relationship("Job", back_populates="job_matches")
@@ -141,6 +145,6 @@ class BusinessChecklist(Base):
     district = Column(String, nullable=False)
     checklist_items = Column(JSON, nullable=False, default=list)
     raw_ai_output = Column(Text, nullable=False, default="")
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     profile = relationship("Profile", back_populates="business_checklists")
