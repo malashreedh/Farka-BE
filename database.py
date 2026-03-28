@@ -8,7 +8,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "sqlite:///./farka_dev.db",
+    "postgresql://farka_user:farka2026@localhost/farka_db",
 )
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -27,4 +27,6 @@ def get_db():
 
 
 def init_db():
-    Base.metadata.create_all(bind=engine)
+    from models import Base as ModelsBase
+
+    ModelsBase.metadata.create_all(bind=engine)

@@ -5,8 +5,6 @@ from typing import Any, Generic, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
-from models import LanguageEnum, PathEnum, SavingsRangeEnum, TradeCategoryEnum
-
 
 T = TypeVar("T")
 
@@ -54,14 +52,14 @@ class ProfileBase(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     current_location: Optional[str] = None
-    path: Optional[PathEnum] = None
-    trade_category: Optional[TradeCategoryEnum] = None
+    path: Optional[str] = None
+    trade_category: Optional[str] = None
     years_experience: Optional[int] = None
     skills: Optional[list[str]] = None
-    language_pref: Optional[LanguageEnum] = None
+    language_pref: Optional[str] = None
     district_target: Optional[str] = None
     has_savings: Optional[bool] = None
-    savings_range: Optional[SavingsRangeEnum] = None
+    savings_range: Optional[str] = None
 
 
 class ProfileUpdate(ProfileBase):

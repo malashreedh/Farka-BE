@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends
+from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,8 +20,6 @@ def create_auth_session(payload: AuthSessionRequest, db: Session = Depends(get_d
         db.commit()
     except IntegrityError:
         db.rollback()
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=409, detail="Phone number already exists")
     db.refresh(profile)
     return {"data": {"profile_id": profile.id, "token": f"dummy_token_{uuid.uuid4()}"}}
