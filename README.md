@@ -1,34 +1,213 @@
-# FARKA Backend
+# FARKA — Backend
 
-FastAPI backend for the FARKA hackathon MVP.
+FARKA is a chat-first platform for Nepali migrant workers abroad (or returning home) who want to know: **"Is there actually something for me back in Nepal?"**
 
-## Run locally
+The chat builds a user profile through conversation, then routes them to one of two paths:
+- **Path A — Job Seeker:** find real jobs matching their skills
+- **Path B — Business Starter:** get an AI-generated 8-week checklist to launch their own venture
 
-1. Create a virtual environment.
-2. Install dependencies:
-   `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and set values if needed.
-4. Start the server:
-   `uvicorn main:app --reload`
+Both English and Nepali (Devanagari) are fully supported — language is auto-detected from the user's first message.
 
-Default local development uses `sqlite:///./farka_dev.db` if `DATABASE_URL` is not set.
-For shared environments, point `DATABASE_URL` to local Postgres or Supabase Postgres.
+---
 
-## API
+## Tech Stack
 
-- `POST /api/v1/chat/start`
-- `POST /api/v1/chat/message`
-- `GET /api/v1/profile/{id}`
-- `PATCH /api/v1/profile/{id}`
-- `GET /api/v1/jobs`
-- `POST /api/v1/jobs/match`
-- `GET /api/v1/jobs/matches/{profile_id}`
-- `POST /api/v1/business/checklist`
-- `GET /api/v1/business/checklist/{profile_id}`
-- `PATCH /api/v1/business/checklist/item`
-- `POST /api/v1/auth/session`
+| Layer | Technology |
+|---|---|
+| Backend | FastAPI (Python 3.11) |
+| Database | PostgreSQL + SQLAlchemy (sync) + Alembic |
+| AI / Chat | OpenAI GPT-4o (chat logic) + Whisper (voice transcription) |
+| Voice | OpenAI Whisper (speech-to-text) + gTTS (text-to-speech) |
+| Auth | Dummy JWT — no real verification (MVP) |
 
-## Notes
+---
 
-- OpenAI is optional for local development. If no `OPENAI_API_KEY` is set, the app uses deterministic fallback chat and checklist logic.
-- Job seeds are created automatically at startup when the jobs table is empty.
+## Project Structure
+
+```
+farka-backend/
+├── main.py                      # FastAPI app, CORS, router registration, startup
+├── database.py                  # SQLAlchemy engine, session, init_db()
+├── models.py                    # ORM models: profiles, chat_sessions, jobs, job_matches, business_checklists
+├── schemas.py                   # Pydantic v2 request/response schemas
+├── seed_jobs.py                 # Seeds 40+ realistic jobs into the DB on startup
+├── requirements.txt
+├── .env                         # Local secrets (not committed)
+├── .env.example                 # Template for .env
+├── routers/
+│   ├── auth.py                  # POST /auth/session — dummy auth
+│   ├── chat.py                  # POST /chat/start, /chat/message, /chat/voice-message
+│   ├── profile.py               # GET/PATCH /profile/{id}
+│   ├── jobs.py                  # GET /jobs, POST /jobs/match, GET /jobs/matches/{profile_id}
+│   └── business.py              # POST/GET /business/checklist, PATCH /business/checklist/item
+├── services/
+│   ├── ai_service.py            # GPT-4o chat logic, Whisper transcription, gTTS voice synthesis, checklist generation
+│   ├── language_service.py      # Language detection (en/ne) + LLM language instructions
+│   ├── matching_service.py      # Job matching algorithm (skill tag scoring)
+│   └── profile_service.py       # Profile creation/update helpers
+└── tests/
+    └── test_app.py              # Integration tests for full chat flows
+```
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- PostgreSQL running locally
+- OpenAI API key with credits (GPT-4o + Whisper)
+
+---
+
+## Setup & Running Locally
+
+### 1. Clone and enter the directory
+```bash
+git clone https://github.com/malashreedh/Farka-BE.git
+cd Farka-BE
+```
+
+### 2. Create and activate a virtual environment
+```bash
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# Mac/Linux
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Set up the database
+```bash
+createdb farka_db
+createuser farka_user
+psql -c "GRANT ALL PRIVILEGES ON DATABASE farka_db TO farka_user;"
+```
+
+### 5. Create your `.env` file
+```bash
+cp .env.example .env
+```
+Then open `.env` and fill in:
+```
+OPENAI_API_KEY=sk-...
+DATABASE_URL=postgresql://farka_user:farka2026@localhost/farka_db
+```
+
+### 6. Start the server
+```bash
+uvicorn main:app --reload
+```
+
+Server runs at: `http://localhost:8000`
+Interactive API docs: `http://localhost:8000/docs`
+
+> Job seed data (40+ jobs) is inserted automatically on first startup if the jobs table is empty.
+
+---
+
+## API Endpoints
+
+All endpoints are prefixed with `/api/v1`. All responses follow this format:
+- **Success:** `{"data": <payload>, "message": "success"}`
+- **Error:** `{"detail": "error message"}`
+
+### Auth
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| POST | `/auth/session` | `{name?, phone?}` | Create profile, return dummy token |
+
+### Chat
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| POST | `/chat/start` | `{}` | Start a new chat session, get welcome message |
+| POST | `/chat/message` | `{session_id, content}` | Send a text message, advance workflow stage |
+| POST | `/chat/voice-message` | `form: session_id + audio file` | Send a voice message, get text + audio reply |
+
+### Profile
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/profile/{id}` | Get profile by ID |
+| PATCH | `/profile/{id}` | Update profile fields |
+
+### Jobs
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/jobs` | List jobs (filter by trade_category, district, experience_level) |
+| POST | `/jobs/match` | Compute and save job matches for a profile |
+| GET | `/jobs/matches/{profile_id}` | Get saved job matches sorted by score |
+
+### Business
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/business/checklist` | Generate AI checklist for a profile |
+| GET | `/business/checklist/{profile_id}` | Get existing checklist |
+| PATCH | `/business/checklist/item` | Toggle a checklist item done/undone |
+
+---
+
+## Chat Workflow
+
+The chat progresses through these stages automatically:
+
+```
+initial
+  └── language detected (en/ne from first message)
+        └── language_set
+              └── collecting_basics       (location + trade)
+                    └── collecting_experience    (years of experience)
+                          └── path_decision      (job or business?)
+                                ├── collecting_skills          → job_matching   → /results/jobs
+                                └── collecting_business_details → checklist_generated → /results/business
+```
+
+Stage transitions are driven entirely by GPT-4o — the model extracts profile data and determines when enough information has been collected to advance.
+
+---
+
+## Voice Chat
+
+Voice support is built on two functions in `services/ai_service.py`:
+
+- **`transcribe_audio(audio_file)`** — Uses OpenAI Whisper to transcribe speech to text. Supports both English and Nepali speech automatically.
+- **`synthesize_speech(text, language)`** — Uses gTTS to convert the bot's reply to MP3 audio. Passes `"ne"` for Nepali, `"en"` for English.
+
+The voice endpoint (`POST /chat/voice-message`) accepts an audio file, transcribes it, runs it through the same `process_message()` logic as text chat, and returns both a text reply and MP3 audio (base64 encoded).
+
+---
+
+## Language Support
+
+Language is auto-detected from the user's first message by scanning for Nepali Devanagari unicode characters (`\u0900–\u097F`). If more than 2 are found, the session is set to Nepali (`ne`), otherwise English (`en`).
+
+All GPT-4o prompts include a language instruction that forces the model to respond in the detected language. gTTS synthesis also switches to Nepali voice when `language="ne"`.
+
+---
+
+## Running Tests
+
+```bash
+pytest tests/test_app.py -v
+```
+
+Tests cover the full job seeker flow, business starter flow, checklist generation, and checklist item toggling.
+
+---
+
+## Team
+
+| Person | Role | Owns |
+|---|---|---|
+| Person 1 | Backend Lead | `main.py`, `database.py`, `models.py`, `schemas.py`, `routers/` |
+| Person 2 | Frontend Lead | `farka-frontend/` (Next.js 14) |
+| Person 3 | AI / Chat Engineer | `services/ai_service.py`, `services/language_service.py` |
+| Person 4 | Data Engineer | `services/matching_service.py`, `seed_jobs.py` |
+| Person 5 | Integration + Pitch | End-to-end testing, demo, presentation |
+
+---
+
+## Nepal-US Hackathon 2026
