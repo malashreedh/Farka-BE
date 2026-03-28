@@ -11,7 +11,7 @@ from openai import OpenAI
 from models import ChatSession, Profile
 from schemas import ChecklistItem
 from services.language_service import get_language_instruction
-from services.workflow_config import DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
+from services.workflow_config import COMMON_DOMAIN_WORKFLOWS, DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
 
 load_dotenv()
 
@@ -30,6 +30,10 @@ TRADE_KEYWORDS = {
 }
 
 DISTRICTS = ["Kathmandu", "Lalitpur", "Bhaktapur", "Pokhara", "Chitwan", "Biratnagar", "Butwal"]
+SMALL_TALK_PATTERNS = {
+    "en": {"hi", "hello", "hey", "good morning", "good evening", "namaste", "yo", "start"},
+    "ne": {"नमस्ते", "हेलो", "हाई", "हे", "सन्चै", "शुरु"},
+}
 SAVINGS_MAP = {
     "under_5L": ["under 5", "under_5l", "below 5", "less than 5", "5 लाखभन्दा कम"],
     "5L_to_20L": ["5l_to_20l", "5 to 20", "5-20", "between 5 and 20", "५ देखि २०"],
@@ -228,17 +232,23 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
     inferred_location = _infer_current_location_from_messages(session.messages)
     inferred_skills = _infer_skills_from_messages(
         session.messages,
-        _clean_trade(extracted.get("trade_category")) or _enum_value(getattr(profile, "trade_category", None)) or inferred_trade,
+        _meaningful_trade(_clean_trade(extracted.get("trade_category")))
+        or _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
+        or _meaningful_trade(inferred_trade),
     )
     fields = {
         "name": extracted.get("name") or getattr(profile, "name", None),
         "current_location": extracted.get("current_location") or getattr(profile, "current_location", None) or inferred_location,
-        "trade_category": _clean_trade(extracted.get("trade_category")) or _enum_value(getattr(profile, "trade_category", None)) or inferred_trade,
+        "trade_category": (
+            _meaningful_trade(_clean_trade(extracted.get("trade_category")))
+            or _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
+            or _meaningful_trade(inferred_trade)
+        ),
         "years_experience": _coerce_years(extracted.get("years_experience")) or getattr(profile, "years_experience", None) or inferred_years,
         "path": (
             extracted.get("path")
             if extracted.get("path") in PATH_CHOICES or extracted.get("path") == "undecided"
-            else _enum_value(getattr(profile, "path", None)) or inferred_path
+            else _meaningful_path(_enum_value(getattr(profile, "path", None))) or inferred_path
         ),
         "skills": _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills,
         "district_target": _clean_district(extracted.get("district_target")) or getattr(profile, "district_target", None) or inferred_district,
@@ -360,7 +370,7 @@ def _extract_skills(text: str, trade: str) -> list[str]:
         return matched
     if "," in text:
         return [part.strip() for part in text.split(",") if part.strip()]
-    return canonical[:4]
+    return []
 
 
 def _extract_business_details(text: str) -> dict[str, Any]:
@@ -402,8 +412,10 @@ def _resolve_progress(stage: str, fields: dict[str, Any], redirect_hint: str | N
     if has_path and fields["path"] == "business_starter" and has_business_details:
         return "checklist_generated", "checklist"
 
-    if not has_basics:
-        return ("collecting_basics" if stage != "language_set" else "collecting_basics"), redirect
+    if not fields["current_location"]:
+        return "language_set", redirect
+    if not fields["trade_category"]:
+        return "collecting_basics", redirect
     if not has_experience:
         return "collecting_experience", redirect
     if not has_path:
@@ -422,9 +434,19 @@ def _compose_guided_reply(
     llm_reply: str | None,
 ) -> str:
     llm_reply = (llm_reply or "").strip()
+    if stage in {"initial", "language_set"} and _is_small_talk_message(session.messages):
+        return _respond(
+            language,
+            "Namaste. I can help with jobs or business options back in Nepal. To begin, which country or city are you working in right now?",
+            "नमस्ते। म तपाईंलाई नेपालमा जागिर वा व्यवसायको विकल्पबारे सहयोग गर्न सक्छु। सुरु गर्न, तपाईं अहिले कुन देश वा सहरमा काम गर्दै हुनुहुन्छ?",
+        )
+    if next_stage == "language_set":
+        return _respond(
+            language,
+            "Which country or city are you working in right now?",
+            "तपाईं अहिले कुन देश वा सहरमा काम गर्दै हुनुहुन्छ?",
+        )
     if next_stage == "collecting_basics":
-        if not fields.get("current_location"):
-            return _respond(language, "Thanks. Which country or city are you working in right now?", "धन्यवाद। तपाईं अहिले कुन देश वा सहरमा काम गर्दै हुनुहुन्छ?")
         domain_examples = ", ".join(workflow["key"] for workflow in COMMON_DOMAIN_WORKFLOWS)
         return _respond(
             language,
@@ -432,7 +454,7 @@ def _compose_guided_reply(
             "धन्यवाद। विदेशमा तपाईंले कस्तो काम गर्नुभयो? सामान्य क्षेत्रहरू निर्माण, हस्पिटालिटी, फ्याक्ट्री, कृषि, यातायात र घरेलु हेरचाह हुन्।",
         )
     if next_stage == "collecting_experience":
-        trade_label = fields.get("trade_category", "that field")
+        trade_label = fields.get("trade_category") or "that field"
         return _respond(
             language,
             f"Understood. About how many years of experience do you have in {trade_label}?",
@@ -538,6 +560,18 @@ def _clean_trade(value: Any) -> str | None:
     return None
 
 
+def _meaningful_trade(value: str | None) -> str | None:
+    if value in {None, "", "other"}:
+        return None
+    return value
+
+
+def _meaningful_path(value: str | None) -> str | None:
+    if value in {None, "", "undecided"}:
+        return None
+    return value
+
+
 def _clean_district(value: Any) -> str | None:
     if isinstance(value, str):
         for district in DISTRICTS:
@@ -571,3 +605,19 @@ def _extract_current_location(text: str) -> str | None:
         if location.lower() in lowered:
             return location
     return None
+
+
+def _is_small_talk_message(messages: list[dict[str, Any]] | None) -> bool:
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        raw = message.get("content", "").strip()
+        lowered = raw.lower()
+        if not raw:
+            return False
+        if lowered in SMALL_TALK_PATTERNS["en"] or raw in SMALL_TALK_PATTERNS["ne"]:
+            return True
+        if len(lowered.split()) <= 2 and lowered in {"hi", "hello", "hey", "namaste"}:
+            return True
+        return False
+    return False
