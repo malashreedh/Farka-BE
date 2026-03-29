@@ -159,14 +159,17 @@ Output ONLY valid JSON.
     return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
 
 
-def transcribe_audio(audio_file: Any) -> str:
+def transcribe_audio(audio_file: Any, language: str | None = None) -> str:
     if not client:
         return ""
 
     try:
         if hasattr(audio_file, "seek"):
             audio_file.seek(0)
-        transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        kwargs: dict[str, Any] = {"model": "whisper-1", "file": audio_file}
+        if language == "ne":
+            kwargs["language"] = "ne"
+        transcript = client.audio.transcriptions.create(**kwargs)
         return (getattr(transcript, "text", "") or "").strip()
     except Exception:
         return ""
