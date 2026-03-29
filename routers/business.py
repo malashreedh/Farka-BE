@@ -14,10 +14,17 @@ from schemas import (
     ChecklistResponse,
     ChecklistToggleRequest,
 )
-from services.ai_service import generate_checklist, generate_viability_notes
-from services.business_viability_service import build_viability_options, infer_savings_amount_npr
+from services.ai_service import generate_checklist, generate_viability_options
+from services.business_viability_service import infer_savings_amount_npr
 
 router = APIRouter(prefix="/business", tags=["business"])
+
+GENERIC_CHECKLIST_MARKERS = (
+    "Confirm ward office registration steps",
+    "Check whether PAN registration",
+    "Compare your savings with cooperative",
+    "Launch with a small opening offer",
+)
 
 
 @router.post("/checklist", response_model=APIResponse[ChecklistResponse])
@@ -28,6 +35,25 @@ def create_checklist(payload: ChecklistGenerateRequest, db: Session = Depends(ge
 
     existing = db.query(BusinessChecklist).filter(BusinessChecklist.profile_id == profile.id).first()
     if existing:
+        raw_output = existing.raw_ai_output or ""
+        is_generic_fallback = any(marker in raw_output for marker in GENERIC_CHECKLIST_MARKERS)
+        wants_nepali = (
+            str(profile.language_pref.value if hasattr(profile.language_pref, "value") else profile.language_pref or "en") == "ne"
+        )
+        looks_english_only = raw_output.isascii()
+
+        if not is_generic_fallback and not (wants_nepali and looks_english_only):
+            return {"data": existing}
+
+        generated = generate_checklist(profile)
+        existing.trade = str(profile.trade_category.value if hasattr(profile.trade_category, "value") else profile.trade_category or "other")
+        existing.district = profile.district_target or "Kathmandu"
+        existing.checklist_items = generated["checklist_items"]
+        existing.raw_ai_output = generated["raw_ai_output"]
+        flag_modified(existing, "checklist_items")
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
         return {"data": existing}
 
     generated = generate_checklist(profile)
@@ -89,10 +115,12 @@ def business_viability(payload: BusinessViabilityRequest, db: Session = Depends(
     if not trade_category:
         raise HTTPException(status_code=400, detail="Trade category is required")
 
-    options = build_viability_options(trade_category, district, savings_amount_npr)
-    notes = generate_viability_notes(trade_category, district, savings_amount_npr, options)
-    for option, note in zip(options, notes, strict=False):
-        option["ai_note"] = note
+    options = generate_viability_options(
+        trade_category=trade_category,
+        district=district,
+        savings_amount_npr=savings_amount_npr,
+        profile=profile,
+    )
 
     return {
         "data": {
