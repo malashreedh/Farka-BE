@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -177,9 +178,8 @@ def transcribe_audio(audio_file: Any) -> str:
         return ""
 
     try:
-        if hasattr(audio_file, "seek"):
-            audio_file.seek(0)
-        transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        prepared_file = _prepare_audio_file(audio_file)
+        transcript = client.audio.transcriptions.create(model="whisper-1", file=prepared_file)
         return (getattr(transcript, "text", "") or "").strip()
     except Exception:
         return ""
@@ -314,6 +314,36 @@ def _synthesize_with_openai(text: str, language: str) -> bytes:
     except Exception:
         return b""
     return b""
+
+
+def _prepare_audio_file(audio_file: Any) -> Any:
+    filename = getattr(audio_file, "filename", None) or getattr(audio_file, "name", None) or "voice-message.webm"
+    content_type = getattr(audio_file, "content_type", None) or _guess_audio_content_type(filename)
+
+    if hasattr(audio_file, "file"):
+        file_obj = audio_file.file
+    else:
+        file_obj = audio_file
+
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    raw_bytes = file_obj.read() if hasattr(file_obj, "read") else None
+    if not raw_bytes:
+        raise ValueError("Empty audio payload")
+
+    return (filename, raw_bytes, content_type)
+
+
+def _guess_audio_content_type(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    return {
+        ".webm": "audio/webm",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+        ".ogg": "audio/ogg",
+    }.get(suffix, "application/octet-stream")
 
 
 def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:

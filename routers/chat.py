@@ -96,7 +96,7 @@ def voice_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    transcript = transcribe_audio(audio.file)
+    transcript = transcribe_audio(audio)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
