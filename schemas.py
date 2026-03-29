@@ -40,7 +40,7 @@ class ChatMessageResponse(BaseModel):
 
 class VoiceMessageResponse(ChatMessageResponse):
     transcript: str
-    audio_base64: Optional[str] = None
+    audio_b64: Optional[str] = None
     audio_mime_type: str = "audio/mpeg"
 
 
