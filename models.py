@@ -73,6 +73,7 @@ class Profile(Base):
     trade_category = Column(Enum(TradeCategoryEnum), nullable=True)
     years_experience = Column(Integer, nullable=True)
     skills = Column(JSON, nullable=True, default=list)
+    business_idea = Column(String, nullable=True)
     language_pref = Column(Enum(LanguageEnum), nullable=False, default=LanguageEnum.en)
     district_target = Column(String, nullable=True)
     has_savings = Column(Boolean, nullable=False, default=False)

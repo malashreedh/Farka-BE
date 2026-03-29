@@ -18,6 +18,7 @@ MEANINGFUL_FIELDS = {
     "current_location",
     "years_experience",
     "skills",
+    "business_idea",
     "district_target",
     "has_savings",
     "savings_range",

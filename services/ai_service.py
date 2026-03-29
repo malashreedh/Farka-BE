@@ -174,10 +174,10 @@ def generate_checklist(profile: Profile) -> dict[str, Any]:
     trade = _enum_value(profile.trade_category) or "other"
     district = profile.district_target or "Kathmandu"
     savings = _enum_value(profile.savings_range) or "under_5L"
-    business_idea = _derive_business_idea(profile, trade)
+    business_idea = getattr(profile, "business_idea", None) or _derive_business_idea(profile, trade)
 
     if not client:
-        items = _generic_checklist(trade, district)
+        items = _generic_checklist(business_idea, district)
         return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
 
     system_prompt = f"""
@@ -219,7 +219,7 @@ Output ONLY valid JSON.
         except Exception:
             continue
 
-    items = _generic_checklist(trade, district)
+    items = _generic_checklist(business_idea, district)
     return {"checklist_items": items, "raw_ai_output": json.dumps(items, ensure_ascii=False)}
 
 
@@ -314,7 +314,7 @@ def generate_viability_options(
     profile: Profile | None = None,
 ) -> list[dict[str, Any]]:
     language = _enum_value(getattr(profile, "language_pref", None)) or "en"
-    business_idea = _derive_business_idea(profile, trade_category)
+    business_idea = getattr(profile, "business_idea", None) or _derive_business_idea(profile, trade_category)
 
     if not client:
         fallback_options = build_viability_options(trade_category, district, savings_amount_npr)
@@ -470,6 +470,12 @@ def _derive_business_idea(profile: Profile | None, trade_category: str) -> str:
     if not profile:
         return trade_category
 
+    # First: check the dedicated business_idea field
+    biz = getattr(profile, "business_idea", None)
+    if biz and str(biz).strip():
+        return str(biz).strip()
+
+    # Fallback: scan skills for non-trade-skill items (legacy behavior)
     skills = [str(item).strip() for item in (getattr(profile, "skills", None) or []) if str(item).strip()]
     filtered = []
     for item in skills:
@@ -558,8 +564,8 @@ Behavior rules:
 - Do not list canned work categories unless the user explicitly asks for examples.
 - If the user says something broad like "I worked in hotels" or "I was in construction", acknowledge it and ask one natural follow-up.
 - For job seekers, keep skill tags in English internally.
-- For business starters, store the user's business idea inside the skills list as one short phrase.
-- Do not move to checklist generation unless district_target, savings_range, and a concrete business idea are all known.
+- business_idea is the specific business the user wants to START in Nepal (e.g. "restaurant", "tailoring shop", "grocery store"). This is DIFFERENT from trade_category which is their past work abroad. A construction worker can want to open a restaurant.
+- Do not move to checklist generation unless district_target, savings_range, and business_idea are all known.
 
 At the very end, output one JSON block inside <extract></extract>.
 Use this exact shape:
@@ -570,6 +576,7 @@ Use this exact shape:
   "years_experience": null,
   "path": null,
   "skills": [],
+  "business_idea": null,
   "district_target": null,
   "savings_range": null,
   "has_savings": null,
@@ -602,6 +609,12 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
         resolved_trade,
     )
     draft_skills = _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills
+    inferred_biz = _infer_business_idea_from_messages(session.messages)
+    raw_biz = extracted.get("business_idea")
+    business_idea = (
+        raw_biz.strip() if isinstance(raw_biz, str) and raw_biz.strip() else None
+    ) or getattr(profile, "business_idea", None) or inferred_biz
+
     fields = {
         "name": extracted.get("name") or getattr(profile, "name", None),
         "current_location": extracted.get("current_location") or getattr(profile, "current_location", None) or inferred_location,
@@ -619,6 +632,7 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
             if extracted.get("savings_range") in SAVINGS_CHOICES
             else _enum_value(getattr(profile, "savings_range", None)) or inferred_savings,
         ),
+        "business_idea": business_idea,
         "district_target": _clean_district(extracted.get("district_target")) or getattr(profile, "district_target", None) or inferred_district,
         "savings_range": (
             extracted.get("savings_range")
@@ -718,6 +732,27 @@ def _infer_years_from_session(messages: list[dict[str, Any]] | None) -> int | No
         years = _extract_years(message.get("content", ""))
         if years is not None:
             return years
+    return None
+
+
+def _infer_business_idea_from_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    """Scan conversation for explicit business idea mentions."""
+    patterns = [
+        r"(?:want to|going to|plan to|like to)\s+(?:start|open|run|build)\s+(?:a\s+)?(.+?)(?:\s+in\s+|\s+at\s+|[,.]|$)",
+        r"(?:start|open|run)\s+(?:a\s+)?(.+?)(?:\s+business|\s+shop|\s+in\s+|[,.]|$)",
+        r"(?:business idea is|my idea is|thinking of)\s+(?:a\s+)?(.+?)(?:[,.]|$)",
+        r"(?:सुरु गर्न|खोल्न)\s+चाहन्छु\s*[:.]?\s*(.+?)(?:[,।.]|$)",
+    ]
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "").strip()
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                idea = match.group(1).strip(" .,")
+                if idea and len(idea) >= 3 and idea.lower() not in {"a", "my", "the", "some", "business"}:
+                    return idea
     return None
 
 
@@ -853,41 +888,43 @@ def _heuristic_extract(session: ChatSession, user_message: str) -> dict[str, Any
         "skills": _extract_skills(user_message, trade if trade != "other" else _infer_trade_from_session(session.messages)),
     }
     active_path = path or _meaningful_path(_enum_value(getattr(getattr(session, "profile", None), "path", None)))
-    extracted.update(_extract_business_details(user_message) if active_path == "business_starter" else {})
+    if active_path == "business_starter":
+        extracted.update(_extract_business_details(user_message))
+        biz_idea = _infer_business_idea_from_messages([{"role": "user", "content": user_message}])
+        if biz_idea:
+            extracted["business_idea"] = biz_idea
     return extracted
 
 
 def _resolve_progress(stage: str, fields: dict[str, Any], redirect_hint: str | None) -> tuple[str, str | None]:
     redirect = redirect_hint
-    has_basics = bool(fields["current_location"] and fields["trade_category"])
-    has_experience = fields["years_experience"] is not None
     has_path = fields["path"] in {"job_seeker", "business_starter"}
+    has_experience = fields["years_experience"] is not None
     has_skills = bool(fields["skills"])
-    has_business_idea = bool(_clean_business_context_values(fields["skills"], fields["district_target"], fields["savings_range"]))
+    has_business_idea = bool(fields.get("business_idea"))
     has_business_details = bool(fields["district_target"] and fields["savings_range"] and has_business_idea)
-    ready_for_job_matching = bool(
-        fields["path"] == "job_seeker"
-        and has_basics
-        and has_experience
-        and has_skills
-        and stage in {"collecting_skills", "job_matching"}
-    )
 
-    if ready_for_job_matching:
+    # Terminal states — profile complete, redirect to results
+    if has_path and fields["path"] == "job_seeker" and has_experience and has_skills:
         return "job_matching", "jobs"
     if has_path and fields["path"] == "business_starter" and has_business_details:
         return "checklist_generated", "checklist"
 
+    # Gathering phase — ask location, then trade, then job/business decision early
     if not fields["current_location"]:
         return "language_set", redirect
     if not fields["trade_category"]:
         return "collecting_basics", redirect
-    if not has_experience:
-        return "collecting_experience", redirect
     if not has_path:
         return "path_decision", redirect
+
+    # Branch: job seeker needs experience + skills
     if fields["path"] == "job_seeker":
+        if not has_experience:
+            return "collecting_experience", redirect
         return "collecting_skills", redirect
+
+    # Branch: business starter needs details (experience is optional)
     return "collecting_business_details", redirect
 
 
@@ -947,36 +984,32 @@ def _compose_guided_reply(
     if next_stage == "collecting_business_details":
         missing_district = not fields.get("district_target")
         missing_savings = not fields.get("savings_range")
-        missing_idea = not _clean_business_context_values(
-            _coerce_skills(fields.get("skills")),
-            fields.get("district_target"),
-            fields.get("savings_range"),
-        )
+        missing_idea = not fields.get("business_idea")
         savings = ", ".join(SAVINGS_CHOICES)
 
         if missing_district and missing_savings and missing_idea:
             return _respond(
                 language,
-                f"Good choice. So I can make the plan realistic, tell me three things together: your target district, your rough savings band ({savings}), and the kind of business you want to start.",
-                f"राम्रो छनोट। योजना व्यवहारिक बनाउन तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ।",
-            )
-        if missing_district:
-            return _respond(
-                language,
-                "I already have the savings context and business direction. Which district in Nepal do you want to return to first?",
-                "बचत र व्यवसायको दिशा बुझें। अब तपाईं नेपालमा कुन जिल्लाबाट सुरु गर्न चाहनुहुन्छ?",
-            )
-        if missing_savings:
-            return _respond(
-                language,
-                f"I already have your district and business idea. What is your current savings range: {savings}?",
-                f"जिल्ला र व्यवसायको विचार बुझें। अब तपाईंको बचतको दायरा कुन हो: {savings}?",
+                f"Good choice. So I can make the plan realistic, tell me three things: what business do you want to start, which district in Nepal, and your rough savings range ({savings}).",
+                f"राम्रो छनोट। योजना व्यवहारिक बनाउन तीन कुरा भन्नुस्: कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ, नेपालको कुन जिल्लामा, र बचतको दायरा ({savings})।",
             )
         if missing_idea:
             return _respond(
                 language,
-                "I already have your district and savings range. What exact business do you want to start there?",
-                "जिल्ला र बचतको दायरा बुझें। अब त्यहाँ तपाईं कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ?",
+                "What kind of business do you want to start in Nepal? For example: restaurant, grocery shop, tailoring, farming, etc.",
+                "तपाईं नेपालमा कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ? उदाहरण: रेस्टुरेन्ट, किराना पसल, सिलाइ, कृषि, आदि।",
+            )
+        if missing_district:
+            return _respond(
+                language,
+                "Which district in Nepal do you want to start your business in?",
+                "तपाईं नेपालको कुन जिल्लामा व्यवसाय सुरु गर्न चाहनुहुन्छ?",
+            )
+        if missing_savings:
+            return _respond(
+                language,
+                f"What is your current savings range: {savings}?",
+                f"तपाईंको बचतको दायरा कुन हो: {savings}?",
             )
         return _respond(
             language,
