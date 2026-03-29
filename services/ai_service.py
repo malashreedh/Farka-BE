@@ -183,17 +183,19 @@ def generate_checklist(profile: Profile) -> dict[str, Any]:
     system_prompt = f"""
 You are a Nepal-focused small business advisor.
 {get_language_instruction(language)}
-Generate a grounded 8-week launch checklist for a returning Nepali migrant worker.
+Generate a grounded 8-week launch checklist for a returning Nepali migrant worker who wants to start a {business_idea} business in {district}.
+Their previous work abroad was in {trade}, but the checklist must be entirely about the {business_idea} business they want to start — NOT about {trade}.
 Be realistic, district-aware, specific, and action-oriented.
 Assume this is a first-time founder who needs a practical, week-by-week roadmap.
 Output ONLY valid JSON.
 """.strip()
 
     user_prompt = (
-        f"Profile: trade={trade}, district={district}, savings={savings}, business idea={business_idea}. "
-        "Return a JSON array only. Each item must be {category: str, week: int, task: str, done: false}. "
+        f"Business to start: {business_idea} in {district}. Savings: {savings}. Previous work abroad: {trade} (for background only). "
+        "Return a JSON array only. Each item must be {{category: str, week: int, task: str, done: false}}. "
         "Use categories from Legal & Registration, Finance & Loans, Location & Equipment, Marketing, Operations. "
-        "Generate 12 to 15 items spread across 8 weeks. Include practical Nepal-specific actions like registration, supplier scouting, "
+        "Generate 12 to 15 items spread across 8 weeks. All tasks must be specific to running a {business_idea} business. "
+        "Include practical Nepal-specific actions like registration, supplier scouting, "
         "location validation, pilot selling, pricing, and first-customer outreach. Mention the district or local context where useful."
     )
 
@@ -317,8 +319,9 @@ def generate_viability_options(
     business_idea = getattr(profile, "business_idea", None) or _derive_business_idea(profile, trade_category)
 
     if not client:
-        fallback_options = build_viability_options(trade_category, district, savings_amount_npr)
-        notes = generate_viability_notes(trade_category, district, savings_amount_npr, fallback_options)
+        fallback_trade = _match_business_idea_to_trade(business_idea) or trade_category
+        fallback_options = build_viability_options(fallback_trade, district, savings_amount_npr)
+        notes = generate_viability_notes(fallback_trade, district, savings_amount_npr, fallback_options)
         for option, note in zip(fallback_options, notes, strict=False):
             option["ai_note"] = note
         return fallback_options
@@ -348,11 +351,11 @@ Return ONLY valid JSON in this exact shape:
 
 Rules:
 - Generate exactly 3 options.
+- ALL 3 options must be based on the user's stated business_idea, NOT on their trade_category. trade_category is their past work abroad — it is background context only.
+- The first option should match the business_idea directly. The other two should be realistic variations or adjacent ideas within the same domain as the business_idea.
 - Keep all descriptive text in the user's language.
 - risk_level must be one of: low, moderate, high.
 - Use realistic Nepal context for the given district.
-- One option should be close to the user's stated business idea if one exists.
-- The other options should be adjacent, realistic alternatives, not the same repeated categories every time.
 - Numbers must be integers in NPR.
 - total_estimated_cost_npr must equal startup_cost_npr + working_capital_npr.
 - savings_gap_npr must be max(total_estimated_cost_npr - savings_amount_npr, 0).
@@ -390,8 +393,9 @@ Rules:
         except Exception:
             continue
 
-    fallback_options = build_viability_options(trade_category, district, savings_amount_npr)
-    notes = generate_viability_notes(trade_category, district, savings_amount_npr, fallback_options)
+    fallback_trade = _match_business_idea_to_trade(business_idea) or trade_category
+    fallback_options = build_viability_options(fallback_trade, district, savings_amount_npr)
+    notes = generate_viability_notes(fallback_trade, district, savings_amount_npr, fallback_options)
     for option, note in zip(fallback_options, notes, strict=False):
         option["ai_note"] = note
     return fallback_options
@@ -464,6 +468,17 @@ def _strip_markdown_fences(text: str) -> str:
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     return cleaned.strip()
+
+
+def _match_business_idea_to_trade(business_idea: str | None) -> str | None:
+    """Map a business idea to the closest trade template category."""
+    if not business_idea:
+        return None
+    lowered = business_idea.lower()
+    for trade, keywords in TRADE_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return trade
+    return None
 
 
 def _derive_business_idea(profile: Profile | None, trade_category: str) -> str:
