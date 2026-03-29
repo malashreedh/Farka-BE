@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import SessionLocal, init_db
-from routers import auth, business, chat, jobs, profile
+from routers import auth, business, chat, jobs, profile, whatsapp
 from seed_jobs import seed
 
 app = FastAPI(title="FARKA API")
@@ -30,6 +30,7 @@ app.include_router(chat.router, prefix="/api/v1")
 app.include_router(profile.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
 app.include_router(business.router, prefix="/api/v1")
+app.include_router(whatsapp.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
