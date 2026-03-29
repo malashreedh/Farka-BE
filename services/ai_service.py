@@ -34,7 +34,29 @@ OPENAI_TTS_VOICE_NE = os.getenv("OPENAI_TTS_VOICE_NE", OPENAI_TTS_VOICE)
 
 TRADE_KEYWORDS = {
     "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold", "निर्माण", "मिस्त्री"],
-    "hospitality": ["hotel", "restaurant", "hospitality", "kitchen", "housekeeping", "guest", "hotel operations", "होटल", "रेस्टुरेन्ट"],
+    "hospitality": [
+        "hotel",
+        "restaurant",
+        "hospitality",
+        "kitchen",
+        "housekeeping",
+        "guest",
+        "hotel operations",
+        "retail",
+        "shop",
+        "store",
+        "cashier",
+        "sales",
+        "customer service",
+        "counter",
+        "होटल",
+        "रेस्टुरेन्ट",
+        "पसल",
+        "ग्राहक",
+        "सामान बेच",
+        "बेच",
+        "कस्टमर",
+    ],
     "manufacturing": ["factory", "manufacturing", "welding", "assembly", "machine", "फ्याक्ट्री", "मेसिन"],
     "agriculture": ["farm", "agriculture", "crop", "livestock", "harvest", "कृषि", "खेती", "पशुपालन"],
     "domestic": ["housemaid", "domestic", "caregiver", "childcare", "elder care", "home", "घरेलु", "हेरचाह"],
@@ -695,6 +717,16 @@ def _extract_skills(text: str, trade: str) -> list[str]:
     matched = [skill for skill in canonical if skill.lower() in lowered]
     if matched:
         return matched
+    inferred: list[str] = []
+    if trade == "hospitality":
+        if any(token in lowered for token in ["customer", "customer service", "guest", "ग्राहक", "कस्टमर"]):
+            inferred.append("guest relations")
+        if any(token in lowered for token in ["cashier", "billing", "counter", "cash", "bill", "बेच", "पसल"]):
+            inferred.append("front desk")
+        if any(token in lowered for token in ["store", "shop", "retail", "inventory", "stock", "सामान"]):
+            inferred.append("hotel operations")
+    if inferred:
+        return list(dict.fromkeys(inferred))
     if "," in text:
         return [part.strip() for part in text.split(",") if part.strip()]
     return []
@@ -771,7 +803,7 @@ def _compose_guided_reply(
     llm_reply: str | None,
 ) -> str:
     llm_reply = (llm_reply or "").strip()
-    if _use_llm_reply(llm_reply):
+    if _use_llm_reply(llm_reply, next_stage):
         return llm_reply
 
     if stage in {"initial", "language_set"} and _is_small_talk_message(session.messages):
@@ -858,13 +890,25 @@ def _validate_checklist_items(items: list[dict[str, Any]]) -> list[dict[str, Any
     return [ChecklistItem.model_validate(item).model_dump() for item in items]
 
 
-def _use_llm_reply(reply: str | None) -> bool:
+def _use_llm_reply(reply: str | None, next_stage: str) -> bool:
     cleaned = (reply or "").strip()
     if not cleaned:
         return False
     if len(cleaned) < 18:
         return False
-    return True
+    checks = {
+        "language_set": ["where", "country", "city", "कहाँ", "देश", "सहर"],
+        "collecting_basics": ["work", "role", "day", "काम", "भूमिका", "जिम्मेवारी"],
+        "collecting_experience": ["year", "years", "वर्ष"],
+        "path_decision": ["job", "business", "जागिर", "व्यवसाय"],
+        "collecting_skills": ["skill", "tasks", "tools", "सीप", "जिम्मेवारी", "कामहरू"],
+        "collecting_business_details": ["district", "savings", "business", "जिल्ला", "बचत", "व्यवसाय"],
+    }
+    tokens = checks.get(next_stage)
+    if not tokens:
+        return True
+    lowered = cleaned.lower()
+    return any(token in lowered for token in tokens)
 
 
 def _respond(language: str, en_text: str, ne_text: str) -> str:
