@@ -40,7 +40,7 @@ class ChatMessageResponse(BaseModel):
 
 class VoiceMessageResponse(ChatMessageResponse):
     transcript: str
-    audio_base64: Optional[str] = None
+    audio_b64: Optional[str] = None
     audio_mime_type: str = "audio/mpeg"
 
 
@@ -107,6 +107,12 @@ class JobMatchResponse(BaseModel):
     matched_tags: list[str]
 
 
+class JobDensityResponse(BaseModel):
+    district: str
+    trade_category: str
+    job_count: int
+
+
 class ChecklistItem(BaseModel):
     category: str
     week: int
@@ -134,6 +140,35 @@ class ChecklistToggleRequest(BaseModel):
     checklist_id: str
     item_index: int
     done: bool
+
+
+class BusinessViabilityRequest(BaseModel):
+    profile_id: Optional[str] = None
+    trade_category: Optional[str] = None
+    district: Optional[str] = None
+    savings_amount_npr: Optional[int] = None
+
+
+class BusinessViabilityOption(BaseModel):
+    title: str
+    fit_reason: str
+    startup_cost_npr: int
+    working_capital_npr: int
+    total_estimated_cost_npr: int
+    savings_gap_npr: int
+    break_even_months: int
+    risk_level: Literal["low", "moderate", "high"]
+    monthly_revenue_range_npr: str
+    monthly_cost_range_npr: str
+    suggested_first_steps: list[str]
+    ai_note: Optional[str] = None
+
+
+class BusinessViabilityResponse(BaseModel):
+    trade_category: str
+    district: str
+    savings_amount_npr: int
+    options: list[BusinessViabilityOption]
 
 
 class AIProcessResult(BaseModel):
