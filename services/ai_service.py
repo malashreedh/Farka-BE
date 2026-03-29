@@ -8,6 +8,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
+import requests
 
 from models import ChatSession, Profile
 from schemas import ChecklistItem
@@ -19,6 +20,11 @@ load_dotenv()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 FALLBACK_MODELS = [OPENAI_MODEL, "gpt-4o-mini", "gpt-4o"]
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_VOICE_ID_EN = os.getenv("ELEVENLABS_VOICE_ID_EN", ELEVENLABS_VOICE_ID)
+ELEVENLABS_VOICE_ID_NE = os.getenv("ELEVENLABS_VOICE_ID_NE", ELEVENLABS_VOICE_ID)
 
 TRADE_KEYWORDS = {
     "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold", "निर्माण", "मिस्त्री"],
@@ -176,6 +182,11 @@ def synthesize_speech(text: str, language: str) -> bytes:
     if not text.strip():
         return b""
 
+    if ELEVENLABS_API_KEY:
+        audio_bytes = _synthesize_with_elevenlabs(text, language)
+        if audio_bytes:
+            return audio_bytes
+
     try:
         from gtts import gTTS
 
@@ -186,6 +197,49 @@ def synthesize_speech(text: str, language: str) -> bytes:
         return audio_buffer.read()
     except Exception:
         return b""
+
+
+def generate_viability_notes(
+    trade_category: str,
+    district: str,
+    savings_amount_npr: int,
+    options: list[dict[str, Any]],
+) -> list[str | None]:
+    if not client or not options:
+        return [None] * len(options)
+
+    prompt = (
+        "You are helping Nepali returnees evaluate small business options. "
+        "Given the computed business options, write one concise note per option. "
+        "Each note should mention practical fit, one caution, and why the break-even timeline is believable. "
+        "Return ONLY valid JSON in the format {\"notes\": [\"...\", \"...\", \"...\"]}."
+    )
+    user_payload = {
+        "trade_category": trade_category,
+        "district": district,
+        "savings_amount_npr": savings_amount_npr,
+        "options": options,
+    }
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+            )
+            content = response.choices[0].message.content or "{}"
+            parsed = json.loads(content)
+            notes = parsed.get("notes", [])
+            if isinstance(notes, list):
+                return [str(item) if item is not None else None for item in notes[: len(options)]]
+        except Exception:
+            continue
+
+    return [None] * len(options)
 
 
 def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
@@ -206,6 +260,30 @@ def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]
         "next_stage": extracted["next_stage"],
         "redirect": extracted["redirect"],
     }
+
+
+def _synthesize_with_elevenlabs(text: str, language: str) -> bytes:
+    voice_id = ELEVENLABS_VOICE_ID_NE if language == "ne" else ELEVENLABS_VOICE_ID_EN
+    try:
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY or "",
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": ELEVENLABS_MODEL_ID,
+                "voice_settings": {"stability": 0.45, "similarity_boost": 0.78},
+            },
+            timeout=30,
+        )
+        if response.ok and response.content:
+            return response.content
+    except Exception:
+        return b""
+    return b""
 
 
 def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
