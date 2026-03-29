@@ -38,6 +38,15 @@ TRADE_KEYWORDS = {
         "hotel",
         "restaurant",
         "hospitality",
+        "mcdonald",
+        "mcdonalds",
+        "server",
+        "waiter",
+        "waitress",
+        "food delivery",
+        "food counter",
+        "fast food",
+        "food service",
         "kitchen",
         "housekeeping",
         "guest",
@@ -76,7 +85,21 @@ STAGE_GOALS = {
     "checklist_generated": "Confirm that the business checklist is being prepared or is ready.",
 }
 
-DISTRICTS = ["Kathmandu", "Lalitpur", "Bhaktapur", "Pokhara", "Chitwan", "Biratnagar", "Butwal"]
+DISTRICTS = [
+    "Kathmandu",
+    "Lalitpur",
+    "Bhaktapur",
+    "Pokhara",
+    "Chitwan",
+    "Biratnagar",
+    "Butwal",
+    "Rupandehi",
+    "Dharan",
+    "Janakpur",
+    "Hetauda",
+    "Nepalgunj",
+    "Dhangadhi",
+]
 SMALL_TALK_PATTERNS = {
     "en": {"hi", "hello", "hey", "good morning", "good evening", "namaste", "yo", "start"},
     "ne": {"नमस्ते", "हेलो", "हाई", "हे", "सन्चै", "शुरु"},
@@ -568,24 +591,21 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
     inferred_years = _infer_years_from_session(session.messages)
     inferred_path = _infer_path_from_messages(session.messages)
     inferred_trade = _infer_trade_from_session(session.messages)
+    extracted_trade = _meaningful_trade(_clean_trade(extracted.get("trade_category")))
+    profile_trade = _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
+    resolved_trade = _resolve_trade_category(session.messages, extracted_trade, profile_trade, inferred_trade)
     inferred_district = _infer_district_from_messages(session.messages)
     inferred_savings = _infer_savings_from_messages(session.messages)
     inferred_location = _infer_current_location_from_messages(session.messages)
     inferred_skills = _infer_skills_from_messages(
         session.messages,
-        _meaningful_trade(_clean_trade(extracted.get("trade_category")))
-        or _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
-        or _meaningful_trade(inferred_trade),
+        resolved_trade,
     )
     draft_skills = _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills
     fields = {
         "name": extracted.get("name") or getattr(profile, "name", None),
         "current_location": extracted.get("current_location") or getattr(profile, "current_location", None) or inferred_location,
-        "trade_category": (
-            _meaningful_trade(_clean_trade(extracted.get("trade_category")))
-            or _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
-            or _meaningful_trade(inferred_trade)
-        ),
+        "trade_category": resolved_trade,
         "years_experience": _coerce_years(extracted.get("years_experience")) or getattr(profile, "years_experience", None) or inferred_years,
         "path": (
             extracted.get("path")
@@ -616,10 +636,54 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
 
 
 def _infer_trade(text: str) -> str:
+    scores: dict[str, int] = {}
     for trade, keywords in TRADE_KEYWORDS.items():
-        if any(keyword in text for keyword in keywords):
-            return trade
+        score = sum(1 for keyword in keywords if keyword in text)
+        if score:
+            scores[trade] = score
+    if scores:
+        priority = {
+            "hospitality": 7,
+            "manufacturing": 6,
+            "construction": 5,
+            "transport": 4,
+            "agriculture": 3,
+            "domestic": 2,
+            "tech": 1,
+        }
+        return max(scores.items(), key=lambda item: (item[1], priority.get(item[0], 0)))[0]
     return "other"
+
+
+def _trade_keyword_score(text: str, trade: str | None) -> int:
+    if not trade or trade not in TRADE_KEYWORDS:
+        return 0
+    lowered = text.lower()
+    return sum(1 for keyword in TRADE_KEYWORDS[trade] if keyword in lowered)
+
+
+def _resolve_trade_category(
+    messages: list[dict[str, Any]] | None,
+    extracted_trade: str | None,
+    profile_trade: str | None,
+    inferred_trade: str | None,
+) -> str | None:
+    history = " ".join(
+        message.get("content", "")
+        for message in (messages or [])
+        if message.get("role") == "user"
+    )
+    candidates = [candidate for candidate in [extracted_trade, profile_trade, _meaningful_trade(inferred_trade)] if candidate]
+    if not candidates:
+        return None
+    best = candidates[0]
+    best_score = _trade_keyword_score(history, best)
+    for candidate in candidates[1:]:
+        score = _trade_keyword_score(history, candidate)
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best
 
 
 def _infer_trade_from_session(messages: list[dict[str, Any]] | None) -> str:
@@ -699,6 +763,32 @@ def _infer_savings_from_messages(messages: list[dict[str, Any]] | None) -> str |
     for key, tokens in SAVINGS_MAP.items():
         if any(token in history for token in tokens):
             return key
+    return _extract_savings_range_from_amount(history)
+
+
+def _extract_savings_range_from_amount(text: str) -> str | None:
+    lowered = text.lower()
+    lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|लाख|लाखs)", lowered)
+    if lakh_match:
+        amount_lakh = float(lakh_match.group(1))
+        if amount_lakh < 5:
+            return "under_5L"
+        if amount_lakh <= 20:
+            return "5L_to_20L"
+        if amount_lakh <= 50:
+            return "20L_to_50L"
+        return "above_50L"
+
+    npr_match = re.search(r"npr\s*([\d,]+)", lowered)
+    if npr_match:
+        amount_npr = int(npr_match.group(1).replace(",", ""))
+        if amount_npr < 500000:
+            return "under_5L"
+        if amount_npr <= 2000000:
+            return "5L_to_20L"
+        if amount_npr <= 5000000:
+            return "20L_to_50L"
+        return "above_50L"
     return None
 
 
@@ -734,8 +824,8 @@ def _extract_skills(text: str, trade: str) -> list[str]:
 
 def _extract_business_details(text: str) -> dict[str, Any]:
     lower = text.lower()
-    district = next((item for item in DISTRICTS if item.lower() in lower), None)
-    savings = next((key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)), None)
+    district = _extract_district_from_text(text)
+    savings = next((key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)), None) or _extract_savings_range_from_amount(text)
     business_idea = _extract_business_idea(text, district, savings)
     data: dict[str, Any] = {}
     if district:
@@ -775,8 +865,15 @@ def _resolve_progress(stage: str, fields: dict[str, Any], redirect_hint: str | N
     has_skills = bool(fields["skills"])
     has_business_idea = bool(_clean_business_context_values(fields["skills"], fields["district_target"], fields["savings_range"]))
     has_business_details = bool(fields["district_target"] and fields["savings_range"] and has_business_idea)
+    ready_for_job_matching = bool(
+        fields["path"] == "job_seeker"
+        and has_basics
+        and has_experience
+        and has_skills
+        and stage in {"collecting_skills", "job_matching"}
+    )
 
-    if has_path and fields["path"] == "job_seeker" and has_skills:
+    if ready_for_job_matching:
         return "job_matching", "jobs"
     if has_path and fields["path"] == "business_starter" and has_business_details:
         return "checklist_generated", "checklist"
@@ -825,11 +922,11 @@ def _compose_guided_reply(
             "धन्यवाद। विदेशमा तपाईंले कस्तो काम गर्नुहुन्थ्यो, र दिनहुँको भूमिका कस्तो थियो?",
         )
     if next_stage == "collecting_experience":
-        trade_label = fields.get("trade_category") or "that field"
+        role_summary = _recent_work_summary(session.messages, fields)
         return _respond(
             language,
-            f"That helps. About how many years of experience do you have in {trade_label}?",
-            f"बुझें। {trade_label} क्षेत्रमा तपाईंको करिब कति वर्षको अनुभव छ?",
+            f"That helps. About how many years of experience do you have in {role_summary}?",
+            f"बुझें। {role_summary} जस्तो काममा तपाईंको करिब कति वर्षको अनुभव छ?",
         )
     if next_stage == "path_decision":
         trade_label = fields.get("trade_category")
@@ -848,11 +945,43 @@ def _compose_guided_reply(
             "राम्रो। मिल्दो जागिर छान्न, त्यो काममा तपाईंले सबैभन्दा धेरै प्रयोग गरेका सीप, औजार, वा जिम्मेवारीहरू भन्नुस्।",
         )
     if next_stage == "collecting_business_details":
+        missing_district = not fields.get("district_target")
+        missing_savings = not fields.get("savings_range")
+        missing_idea = not _clean_business_context_values(
+            _coerce_skills(fields.get("skills")),
+            fields.get("district_target"),
+            fields.get("savings_range"),
+        )
         savings = ", ".join(SAVINGS_CHOICES)
+
+        if missing_district and missing_savings and missing_idea:
+            return _respond(
+                language,
+                f"Good choice. So I can make the plan realistic, tell me three things together: your target district, your rough savings band ({savings}), and the kind of business you want to start.",
+                f"राम्रो छनोट। योजना व्यवहारिक बनाउन तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ।",
+            )
+        if missing_district:
+            return _respond(
+                language,
+                "I already have the savings context and business direction. Which district in Nepal do you want to return to first?",
+                "बचत र व्यवसायको दिशा बुझें। अब तपाईं नेपालमा कुन जिल्लाबाट सुरु गर्न चाहनुहुन्छ?",
+            )
+        if missing_savings:
+            return _respond(
+                language,
+                f"I already have your district and business idea. What is your current savings range: {savings}?",
+                f"जिल्ला र व्यवसायको विचार बुझें। अब तपाईंको बचतको दायरा कुन हो: {savings}?",
+            )
+        if missing_idea:
+            return _respond(
+                language,
+                "I already have your district and savings range. What exact business do you want to start there?",
+                "जिल्ला र बचतको दायरा बुझें। अब त्यहाँ तपाईं कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ?",
+            )
         return _respond(
             language,
-            f"Good choice. So I can make the plan realistic, tell me three things together: your target district, your rough savings band ({savings}), and the kind of business you want to start.",
-            f"राम्रो छनोट। योजना व्यवहारिक बनाउन तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ।",
+            "Thanks. I have enough to build a realistic business roadmap now.",
+            "धन्यवाद। अब व्यवहारिक व्यवसाय योजना बनाउन पुग्ने जानकारी मसँग छ।",
         )
     if next_stage == "job_matching":
         return _respond(
@@ -936,6 +1065,51 @@ def _coerce_skills(value: Any) -> list[str]:
     return []
 
 
+def _recent_work_summary(messages: list[dict[str, Any]] | None, fields: dict[str, Any]) -> str:
+    history = " ".join(
+        str(message.get("content", ""))
+        for message in (messages or [])
+        if message.get("role") == "user"
+    ).lower()
+
+    if any(token in history for token in ["mcdonald", "mcdonalds", "server", "restaurant", "food service", "waiter", "waitress"]):
+        if any(token in history for token in ["driver", "delivery", "ride", "gाडी", "चलाओ", "चगाओ"]):
+            return "restaurant and delivery work"
+        return "restaurant or customer service work"
+    if any(token in history for token in ["shop", "store", "retail", "cashier", "counter", "पसल", "सामान बेच", "कस्टमर", "ग्राहक"]):
+        if any(token in history for token in ["driver", "delivery", "gाडी", "चलाओ", "चगाओ"]):
+            return "shop and delivery work"
+        return "shop or customer-facing work"
+
+    skills = _coerce_skills(fields.get("skills"))
+    if skills:
+        if len(skills) == 1:
+            return skills[0]
+        return ", ".join(skills[:2])
+
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content", "")).strip()
+        lowered = content.lower()
+        if any(token in lowered for token in ["worked", "work", "job", "role", "काम", "गर", "थे"]):
+            shortened = re.sub(r"^\s*(i worked in|i worked as|i was working in|मैले|म)\s*", "", content, flags=re.IGNORECASE).strip(" .")
+            if shortened:
+                return shortened[:80]
+
+    trade_category = fields.get("trade_category")
+    readable = {
+        "construction": "construction or site work",
+        "hospitality": "customer-facing service work",
+        "manufacturing": "factory or production work",
+        "agriculture": "agriculture or farm work",
+        "domestic": "domestic or care work",
+        "transport": "driving or transport work",
+        "tech": "technical or digital work",
+    }
+    return readable.get(str(trade_category), "that kind of work")
+
+
 def _clean_business_context_values(values: list[str], district: str | None, savings_range: str | None) -> list[str]:
     cleaned: list[str] = []
     savings_tokens = set()
@@ -951,7 +1125,7 @@ def _clean_business_context_values(values: list[str], district: str | None, savi
             continue
         if lowered in SAVINGS_CHOICES or lowered in savings_tokens:
             continue
-        if lowered in {"business", "small business", "own business", "व्यवसाय"}:
+        if lowered in {"business", "small business", "own business", "व्यवसाय", "start business"}:
             continue
         if len(item) < 4:
             continue
@@ -970,7 +1144,10 @@ def _extract_business_idea(text: str, district: str | None, savings: str | None)
     for key, tokens in SAVINGS_MAP.items():
         for token in tokens:
             candidate = re.sub(re.escape(token), "", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\b\d+(?:\.\d+)?\s*(?:lakh|lakhs|लाख|lakhs?)\b", " ", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\bnpr\s*[\d,]+\b", " ", candidate, flags=re.IGNORECASE)
     candidate = re.sub(r"\b(district|savings|range|target|my|is|in|at|want|to|start|business|idea)\b", " ", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\b(i have|i need|from somewhere|already have|have)\b", " ", candidate, flags=re.IGNORECASE)
     candidate = re.sub(r"[,:;.\-_/]+", " ", candidate)
     candidate = re.sub(r"\s+", " ", candidate).strip()
 
@@ -1015,7 +1192,49 @@ def _clean_district(value: Any) -> str | None:
         for district in DISTRICTS:
             if district.lower() in value.lower():
                 return district
+        fallback = _normalize_district_text(value)
+        if fallback:
+            return fallback
     return None
+
+
+def _extract_district_from_text(text: str) -> str | None:
+    for district in DISTRICTS:
+        if district.lower() in text.lower():
+            return district
+
+    patterns = [
+        r"(?:target\s+district|district)\s+([A-Za-z][A-Za-z\s-]{1,30})",
+        r"जिल्ला\s*([^\s,।.]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _normalize_district_text(match.group(1))
+        if candidate:
+            return candidate
+
+    return None
+
+
+def _normalize_district_text(value: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", str(value).strip(" ,.;:"))
+    if not cleaned:
+        return None
+    if len(cleaned) > 32:
+        return None
+    if re.search(r"\d", cleaned):
+        return None
+    stop_tokens = {"savings", "range", "business", "idea", "target", "district", "start", "want", "र", "बचत"}
+    lowered = cleaned.lower()
+    if lowered in stop_tokens:
+        return None
+    if any(token in lowered for token in ["lakh", "lakhs"]):
+        return None
+    if re.search(r"[A-Za-z]", cleaned):
+        return " ".join(part.upper() if len(part) <= 3 and part.isupper() else part.capitalize() for part in cleaned.split())
+    return cleaned
 
 
 def _extract_current_location(text: str) -> str | None:
