@@ -12,7 +12,8 @@ from openai import OpenAI
 import requests
 
 from models import ChatSession, Profile
-from schemas import ChecklistItem
+from schemas import BusinessViabilityOption, ChecklistItem
+from services.business_viability_service import build_viability_options
 from services.language_service import get_language_instruction
 from services.workflow_config import COMMON_DOMAIN_WORKFLOWS, DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
 
@@ -128,7 +129,7 @@ def generate_checklist(profile: Profile) -> dict[str, Any]:
     trade = _enum_value(profile.trade_category) or "other"
     district = profile.district_target or "Kathmandu"
     savings = _enum_value(profile.savings_range) or "under_5L"
-    business_idea = ", ".join(profile.skills or []) or trade
+    business_idea = _derive_business_idea(profile, trade)
 
     if not client:
         items = _generic_checklist(trade, district)
@@ -162,10 +163,14 @@ Output ONLY valid JSON.
                 ],
             )
             raw = response.choices[0].message.content or "[]"
-            items = _validate_checklist_items(json.loads(raw))
+            cleaned = _strip_markdown_fences(raw)
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                parsed = parsed.get("checklist_items") or parsed.get("items") or parsed.get("checklist") or []
+            items = _validate_checklist_items(parsed)
             if not items:
                 raise ValueError("Empty checklist")
-            return {"checklist_items": items, "raw_ai_output": raw}
+            return {"checklist_items": items, "raw_ai_output": cleaned}
         except Exception:
             continue
 
@@ -257,6 +262,96 @@ def generate_viability_notes(
     return [None] * len(options)
 
 
+def generate_viability_options(
+    trade_category: str,
+    district: str,
+    savings_amount_npr: int,
+    profile: Profile | None = None,
+) -> list[dict[str, Any]]:
+    language = _enum_value(getattr(profile, "language_pref", None)) or "en"
+    business_idea = _derive_business_idea(profile, trade_category)
+
+    if not client:
+        fallback_options = build_viability_options(trade_category, district, savings_amount_npr)
+        notes = generate_viability_notes(trade_category, district, savings_amount_npr, fallback_options)
+        for option, note in zip(fallback_options, notes, strict=False):
+            option["ai_note"] = note
+        return fallback_options
+
+    system_prompt = f"""
+You are a Nepal-focused business advisor helping a returning migrant worker evaluate realistic small business options.
+{get_language_instruction(language)}
+Return ONLY valid JSON in this exact shape:
+{{
+  "options": [
+    {{
+      "title": "string",
+      "fit_reason": "string",
+      "startup_cost_npr": 0,
+      "working_capital_npr": 0,
+      "total_estimated_cost_npr": 0,
+      "savings_gap_npr": 0,
+      "break_even_months": 0,
+      "risk_level": "low",
+      "monthly_revenue_range_npr": "string",
+      "monthly_cost_range_npr": "string",
+      "suggested_first_steps": ["string"],
+      "ai_note": "string"
+    }}
+  ]
+}}
+
+Rules:
+- Generate exactly 3 options.
+- Keep all descriptive text in the user's language.
+- risk_level must be one of: low, moderate, high.
+- Use realistic Nepal context for the given district.
+- One option should be close to the user's stated business idea if one exists.
+- The other options should be adjacent, realistic alternatives, not the same repeated categories every time.
+- Numbers must be integers in NPR.
+- total_estimated_cost_npr must equal startup_cost_npr + working_capital_npr.
+- savings_gap_npr must be max(total_estimated_cost_npr - savings_amount_npr, 0).
+- break_even_months should be realistic, usually between 4 and 30.
+- monthly revenue and cost ranges should be plausible formatted strings like "NPR 120,000 - 165,000".
+- suggested_first_steps should contain 3 short, practical steps.
+- ai_note should be a concise 1-2 sentence practical assessment.
+""".strip()
+
+    user_payload = {
+        "trade_category": trade_category,
+        "district": district,
+        "savings_amount_npr": savings_amount_npr,
+        "business_idea": business_idea,
+        "language": language,
+    }
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.35,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+            )
+            raw = response.choices[0].message.content or "{}"
+            cleaned = _strip_markdown_fences(raw)
+            parsed = json.loads(cleaned)
+            options = parsed.get("options", [])
+            validated = [BusinessViabilityOption.model_validate(item).model_dump() for item in options[:3]]
+            if len(validated) == 3:
+                return validated
+        except Exception:
+            continue
+
+    fallback_options = build_viability_options(trade_category, district, savings_amount_npr)
+    notes = generate_viability_notes(trade_category, district, savings_amount_npr, fallback_options)
+    for option, note in zip(fallback_options, notes, strict=False):
+        option["ai_note"] = note
+    return fallback_options
+
+
 def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
     extracted = _normalize_extracted_data(_heuristic_extract(session, user_message), session)
     language = _enum_value(session.language) or "en"
@@ -317,6 +412,32 @@ def _synthesize_with_openai(text: str, language: str) -> bytes:
     except Exception:
         return b""
     return b""
+
+
+def _strip_markdown_fences(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _derive_business_idea(profile: Profile | None, trade_category: str) -> str:
+    if not profile:
+        return trade_category
+
+    skills = [str(item).strip() for item in (getattr(profile, "skills", None) or []) if str(item).strip()]
+    filtered = []
+    for item in skills:
+        lowered = item.lower()
+        if lowered in SAVINGS_MAP or item in DISTRICTS:
+            continue
+        if item in SKILL_TAGS.get(trade_category, []):
+            continue
+        filtered.append(item)
+
+    if filtered:
+        return filtered[-1]
+    return trade_category
 
 
 def _prepare_audio_file(audio_file: Any) -> Any:
