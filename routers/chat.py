@@ -94,9 +94,9 @@ def voice_message(
 ):
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    transcript = transcribe_audio(audio.file)
+    transcript = transcribe_audio(audio)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
@@ -108,7 +108,7 @@ def voice_message(
         "data": {
             **result,
             "transcript": transcript,
-            "audio_base64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
+            "audio_b64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
             "audio_mime_type": "audio/mpeg",
         }
     }

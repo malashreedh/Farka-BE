@@ -4,10 +4,12 @@ import io
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
+import requests
 
 from models import ChatSession, Profile
 from schemas import ChecklistItem
@@ -19,6 +21,15 @@ load_dotenv()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 FALLBACK_MODELS = [OPENAI_MODEL, "gpt-4o-mini", "gpt-4o"]
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_VOICE_ID_EN = os.getenv("ELEVENLABS_VOICE_ID_EN", ELEVENLABS_VOICE_ID)
+ELEVENLABS_VOICE_ID_NE = os.getenv("ELEVENLABS_VOICE_ID_NE", ELEVENLABS_VOICE_ID)
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
+OPENAI_TTS_VOICE_EN = os.getenv("OPENAI_TTS_VOICE_EN", OPENAI_TTS_VOICE)
+OPENAI_TTS_VOICE_NE = os.getenv("OPENAI_TTS_VOICE_NE", OPENAI_TTS_VOICE)
 
 TRADE_KEYWORDS = {
     "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold", "निर्माण", "मिस्त्री"],
@@ -37,7 +48,7 @@ STAGE_GOALS = {
     "collecting_experience": "Find out their years of experience in that work.",
     "path_decision": "Find out whether they want a job in Nepal or want to start a business.",
     "collecting_skills": "Help the user confirm the skills they actually used most in their work.",
-    "collecting_business_details": "Collect district, savings range, and business idea needed for the checklist.",
+    "collecting_business_details": "Collect district, savings range, and a concrete business idea needed for the checklist. Keep asking until all three are known.",
     "job_matching": "Confirm that job matching is underway.",
     "checklist_generated": "Confirm that the business checklist is being prepared or is ready.",
 }
@@ -127,14 +138,17 @@ def generate_checklist(profile: Profile) -> dict[str, Any]:
 You are a Nepal-focused small business advisor.
 {get_language_instruction(language)}
 Generate a grounded 8-week launch checklist for a returning Nepali migrant worker.
-Be realistic, specific, and action-oriented.
+Be realistic, district-aware, specific, and action-oriented.
+Assume this is a first-time founder who needs a practical, week-by-week roadmap.
 Output ONLY valid JSON.
 """.strip()
 
     user_prompt = (
         f"Profile: trade={trade}, district={district}, savings={savings}, business idea={business_idea}. "
         "Return a JSON array only. Each item must be {category: str, week: int, task: str, done: false}. "
-        "Use categories from Legal & Registration, Finance & Loans, Location & Equipment, Marketing, Operations."
+        "Use categories from Legal & Registration, Finance & Loans, Location & Equipment, Marketing, Operations. "
+        "Generate 12 to 15 items spread across 8 weeks. Include practical Nepal-specific actions like registration, supplier scouting, "
+        "location validation, pilot selling, pricing, and first-customer outreach. Mention the district or local context where useful."
     )
 
     for model in FALLBACK_MODELS:
@@ -164,9 +178,8 @@ def transcribe_audio(audio_file: Any) -> str:
         return ""
 
     try:
-        if hasattr(audio_file, "seek"):
-            audio_file.seek(0)
-        transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        prepared_file = _prepare_audio_file(audio_file)
+        transcript = client.audio.transcriptions.create(model="whisper-1", file=prepared_file)
         return (getattr(transcript, "text", "") or "").strip()
     except Exception:
         return ""
@@ -175,6 +188,16 @@ def transcribe_audio(audio_file: Any) -> str:
 def synthesize_speech(text: str, language: str) -> bytes:
     if not text.strip():
         return b""
+
+    if ELEVENLABS_API_KEY:
+        audio_bytes = _synthesize_with_elevenlabs(text, language)
+        if audio_bytes:
+            return audio_bytes
+
+    if client:
+        audio_bytes = _synthesize_with_openai(text, language)
+        if audio_bytes:
+            return audio_bytes
 
     try:
         from gtts import gTTS
@@ -186,6 +209,49 @@ def synthesize_speech(text: str, language: str) -> bytes:
         return audio_buffer.read()
     except Exception:
         return b""
+
+
+def generate_viability_notes(
+    trade_category: str,
+    district: str,
+    savings_amount_npr: int,
+    options: list[dict[str, Any]],
+) -> list[str | None]:
+    if not client or not options:
+        return [None] * len(options)
+
+    prompt = (
+        "You are helping Nepali returnees evaluate small business options. "
+        "Given the computed business options, write one concise note per option. "
+        "Each note should mention practical fit, one caution, and why the break-even timeline is believable. "
+        "Return ONLY valid JSON in the format {\"notes\": [\"...\", \"...\", \"...\"]}."
+    )
+    user_payload = {
+        "trade_category": trade_category,
+        "district": district,
+        "savings_amount_npr": savings_amount_npr,
+        "options": options,
+    }
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+            )
+            content = response.choices[0].message.content or "{}"
+            parsed = json.loads(content)
+            notes = parsed.get("notes", [])
+            if isinstance(notes, list):
+                return [str(item) if item is not None else None for item in notes[: len(options)]]
+        except Exception:
+            continue
+
+    return [None] * len(options)
 
 
 def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]:
@@ -206,6 +272,78 @@ def _fallback_process(session: ChatSession, user_message: str) -> dict[str, Any]
         "next_stage": extracted["next_stage"],
         "redirect": extracted["redirect"],
     }
+
+
+def _synthesize_with_elevenlabs(text: str, language: str) -> bytes:
+    voice_id = ELEVENLABS_VOICE_ID_NE if language == "ne" else ELEVENLABS_VOICE_ID_EN
+    try:
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY or "",
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": ELEVENLABS_MODEL_ID,
+                "voice_settings": {"stability": 0.45, "similarity_boost": 0.78},
+            },
+            timeout=30,
+        )
+        if response.ok and response.content:
+            return response.content
+    except Exception:
+        return b""
+    return b""
+
+
+def _synthesize_with_openai(text: str, language: str) -> bytes:
+    voice = OPENAI_TTS_VOICE_NE if language == "ne" else OPENAI_TTS_VOICE_EN
+    try:
+        response = client.audio.speech.create(
+            model=OPENAI_TTS_MODEL,
+            voice=voice,
+            input=text,
+        )
+        content = getattr(response, "content", None)
+        if content:
+            return content
+        if hasattr(response, "read"):
+            return response.read()
+    except Exception:
+        return b""
+    return b""
+
+
+def _prepare_audio_file(audio_file: Any) -> Any:
+    filename = getattr(audio_file, "filename", None) or getattr(audio_file, "name", None) or "voice-message.webm"
+    content_type = getattr(audio_file, "content_type", None) or _guess_audio_content_type(filename)
+
+    if hasattr(audio_file, "file"):
+        file_obj = audio_file.file
+    else:
+        file_obj = audio_file
+
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    raw_bytes = file_obj.read() if hasattr(file_obj, "read") else None
+    if not raw_bytes:
+        raise ValueError("Empty audio payload")
+
+    return (filename, raw_bytes, content_type)
+
+
+def _guess_audio_content_type(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    return {
+        ".webm": "audio/webm",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+        ".ogg": "audio/ogg",
+    }.get(suffix, "application/octet-stream")
 
 
 def _parse_extract(response_text: str) -> tuple[str, dict[str, Any]]:
@@ -246,6 +384,8 @@ Behavior rules:
 - Only advance the stage when the required information has actually been collected.
 - If the user gives multiple useful facts in one message, use all of them.
 - For job seekers, keep skill tags in English internally.
+- For business starters, store the user's business idea inside the skills list as one short phrase.
+- Do not move to checklist generation unless district_target, savings_range, and a concrete business idea are all known.
 
 At the very end, output one JSON block inside <extract></extract>.
 Use this exact shape:
@@ -286,6 +426,7 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
         or _meaningful_trade(_enum_value(getattr(profile, "trade_category", None)))
         or _meaningful_trade(inferred_trade),
     )
+    draft_skills = _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills
     fields = {
         "name": extracted.get("name") or getattr(profile, "name", None),
         "current_location": extracted.get("current_location") or getattr(profile, "current_location", None) or inferred_location,
@@ -300,7 +441,13 @@ def _normalize_extracted_data(extracted: dict[str, Any], session: ChatSession) -
             if extracted.get("path") in PATH_CHOICES or extracted.get("path") == "undecided"
             else _meaningful_path(_enum_value(getattr(profile, "path", None))) or inferred_path
         ),
-        "skills": _coerce_skills(extracted.get("skills")) or getattr(profile, "skills", None) or inferred_skills,
+        "skills": _clean_business_context_values(
+            draft_skills,
+            _clean_district(extracted.get("district_target")) or getattr(profile, "district_target", None) or inferred_district,
+            extracted.get("savings_range")
+            if extracted.get("savings_range") in SAVINGS_CHOICES
+            else _enum_value(getattr(profile, "savings_range", None)) or inferred_savings,
+        ),
         "district_target": _clean_district(extracted.get("district_target")) or getattr(profile, "district_target", None) or inferred_district,
         "savings_range": (
             extracted.get("savings_range")
@@ -426,14 +573,18 @@ def _extract_skills(text: str, trade: str) -> list[str]:
 
 def _extract_business_details(text: str) -> dict[str, Any]:
     lower = text.lower()
-    district = next((item for item in DISTRICTS if item.lower() in lower), "Kathmandu")
-    savings = next((key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)), "under_5L")
-    return {
-        "district_target": district,
-        "savings_range": savings,
-        "has_savings": savings != "under_5L",
-        "skills": [text.strip()],
-    }
+    district = next((item for item in DISTRICTS if item.lower() in lower), None)
+    savings = next((key for key, tokens in SAVINGS_MAP.items() if any(token in lower for token in tokens)), None)
+    business_idea = _extract_business_idea(text, district, savings)
+    data: dict[str, Any] = {}
+    if district:
+        data["district_target"] = district
+    if savings:
+        data["savings_range"] = savings
+        data["has_savings"] = savings != "under_5L"
+    if business_idea:
+        data["skills"] = [business_idea]
+    return data
 
 
 def _heuristic_extract(session: ChatSession, user_message: str) -> dict[str, Any]:
@@ -450,7 +601,8 @@ def _heuristic_extract(session: ChatSession, user_message: str) -> dict[str, Any
         "path": path,
         "skills": _extract_skills(user_message, trade if trade != "other" else _infer_trade_from_session(session.messages)),
     }
-    extracted.update(_extract_business_details(user_message) if path == "business_starter" else {})
+    active_path = path or _meaningful_path(_enum_value(getattr(getattr(session, "profile", None), "path", None)))
+    extracted.update(_extract_business_details(user_message) if active_path == "business_starter" else {})
     return extracted
 
 
@@ -460,7 +612,8 @@ def _resolve_progress(stage: str, fields: dict[str, Any], redirect_hint: str | N
     has_experience = fields["years_experience"] is not None
     has_path = fields["path"] in {"job_seeker", "business_starter"}
     has_skills = bool(fields["skills"])
-    has_business_details = bool(fields["district_target"] and fields["savings_range"])
+    has_business_idea = bool(_clean_business_context_values(fields["skills"], fields["district_target"], fields["savings_range"]))
+    has_business_details = bool(fields["district_target"] and fields["savings_range"] and has_business_idea)
 
     if has_path and fields["path"] == "job_seeker" and has_skills:
         return "job_matching", "jobs"
@@ -534,8 +687,8 @@ def _compose_guided_reply(
         savings = ", ".join(SAVINGS_CHOICES)
         return _respond(
             language,
-            f"Good choice. Tell me your target district, rough savings band ({savings}), and what business you want to start. Common districts: {districts}.",
-            f"राम्रो छनोट। तपाईं फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ भन्नुस्। उदाहरण जिल्ला: {districts}।",
+            f"Good choice. Tell me three things together: your target district, rough savings band ({savings}), and the business you want to start. Common districts: {districts}.",
+            f"राम्रो छनोट। तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ। उदाहरण जिल्ला: {districts}।",
         )
     if next_stage == "job_matching":
         return _respond(
@@ -596,6 +749,51 @@ def _coerce_skills(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [part.strip() for part in value.split(",") if part.strip()]
     return []
+
+
+def _clean_business_context_values(values: list[str], district: str | None, savings_range: str | None) -> list[str]:
+    cleaned: list[str] = []
+    savings_tokens = set()
+    if savings_range and savings_range in SAVINGS_MAP:
+        savings_tokens.update(token.lower() for token in SAVINGS_MAP[savings_range])
+
+    for raw in values:
+        item = str(raw).strip()
+        if not item:
+            continue
+        lowered = item.lower()
+        if district and lowered == district.lower():
+            continue
+        if lowered in SAVINGS_CHOICES or lowered in savings_tokens:
+            continue
+        if lowered in {"business", "small business", "own business", "व्यवसाय"}:
+            continue
+        if len(item) < 4:
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _extract_business_idea(text: str, district: str | None, savings: str | None) -> str | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    candidate = cleaned
+    if district:
+        candidate = re.sub(re.escape(district), "", candidate, flags=re.IGNORECASE)
+    for key, tokens in SAVINGS_MAP.items():
+        for token in tokens:
+            candidate = re.sub(re.escape(token), "", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\b(district|savings|range|target|my|is|in|at|want|to|start|business|idea)\b", " ", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"[,:;.\-_/]+", " ", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    if not candidate or len(candidate) < 4:
+        return None
+    if candidate.lower() in {district.lower() for district in DISTRICTS}:
+        return None
+    return candidate
 
 
 def _coerce_bool(value: Any) -> bool | None:

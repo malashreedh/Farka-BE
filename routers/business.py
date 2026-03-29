@@ -6,8 +6,16 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from database import get_db
 from models import BusinessChecklist, Profile
-from schemas import APIResponse, ChecklistGenerateRequest, ChecklistResponse, ChecklistToggleRequest
-from services.ai_service import generate_checklist
+from schemas import (
+    APIResponse,
+    BusinessViabilityRequest,
+    BusinessViabilityResponse,
+    ChecklistGenerateRequest,
+    ChecklistResponse,
+    ChecklistToggleRequest,
+)
+from services.ai_service import generate_checklist, generate_viability_notes
+from services.business_viability_service import build_viability_options, infer_savings_amount_npr
 
 router = APIRouter(prefix="/business", tags=["business"])
 
@@ -60,3 +68,37 @@ def toggle_checklist_item(payload: ChecklistToggleRequest, db: Session = Depends
     db.commit()
     db.refresh(checklist)
     return {"data": checklist}
+
+
+@router.post("/viability", response_model=APIResponse[BusinessViabilityResponse])
+def business_viability(payload: BusinessViabilityRequest, db: Session = Depends(get_db)):
+    profile = None
+    if payload.profile_id:
+        profile = db.query(Profile).filter(Profile.id == payload.profile_id).first()
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+    trade_category = payload.trade_category or (
+        str(profile.trade_category.value if hasattr(profile.trade_category, "value") else profile.trade_category)
+        if profile and getattr(profile, "trade_category", None)
+        else None
+    )
+    district = payload.district or (profile.district_target if profile else None) or "Kathmandu"
+    savings_amount_npr = payload.savings_amount_npr or infer_savings_amount_npr(profile)
+
+    if not trade_category:
+        raise HTTPException(status_code=400, detail="Trade category is required")
+
+    options = build_viability_options(trade_category, district, savings_amount_npr)
+    notes = generate_viability_notes(trade_category, district, savings_amount_npr, options)
+    for option, note in zip(options, notes, strict=False):
+        option["ai_note"] = note
+
+    return {
+        "data": {
+            "trade_category": trade_category,
+            "district": district,
+            "savings_amount_npr": savings_amount_npr,
+            "options": options,
+        }
+    }

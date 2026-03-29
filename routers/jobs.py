@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from models import Job, JobMatch, Profile
-from schemas import APIResponse, JobMatchRequest, JobMatchResponse, JobResponse
+from schemas import APIResponse, JobDensityResponse, JobMatchRequest, JobMatchResponse, JobResponse
 from services.matching_service import compute_matches
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -28,6 +29,23 @@ def list_jobs(
 
     jobs = query.offset((page - 1) * limit).limit(limit).all()
     return {"data": jobs}
+
+
+@router.get("/density", response_model=APIResponse[list[JobDensityResponse]])
+def job_density(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Job.district, Job.trade_category, func.count(Job.id).label("job_count"))
+        .filter(Job.is_active.is_(True))
+        .group_by(Job.district, Job.trade_category)
+        .order_by(Job.district.asc(), func.count(Job.id).desc())
+        .all()
+    )
+    return {
+        "data": [
+            {"district": district, "trade_category": trade_category, "job_count": int(job_count)}
+            for district, trade_category, job_count in rows
+        ]
+    }
 
 
 @router.post("/match", response_model=APIResponse[list[JobMatchResponse]])
