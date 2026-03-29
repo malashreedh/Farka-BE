@@ -17,7 +17,7 @@ Both English and Nepali (Devanagari) are fully supported — language is auto-de
 | Backend | FastAPI (Python 3.11) |
 | Database | PostgreSQL + SQLAlchemy (sync) + Alembic |
 | AI / Chat | OpenAI GPT-4o mini (chat logic) + Whisper (voice transcription) |
-| Voice | OpenAI Whisper (speech-to-text) + ElevenLabs / gTTS fallback (text-to-speech) |
+| Voice | OpenAI Whisper (speech-to-text) + ElevenLabs / OpenAI TTS / gTTS fallback (text-to-speech) |
 | Auth | Dummy JWT — no real verification (MVP) |
 
 ---
@@ -172,7 +172,7 @@ Stage transitions are driven entirely by GPT-4o — the model extracts profile d
 Voice support is built on two functions in `services/ai_service.py`:
 
 - **`transcribe_audio(audio_file)`** — Uses OpenAI Whisper to transcribe speech to text. Supports both English and Nepali speech automatically.
-- **`synthesize_speech(text, language)`** — Uses ElevenLabs when configured, otherwise falls back to gTTS. Passes `"ne"` for Nepali, `"en"` for English.
+- **`synthesize_speech(text, language)`** — Uses ElevenLabs when configured, then falls back to OpenAI TTS, then gTTS. Passes `"ne"` for Nepali, `"en"` for English.
 
 The voice endpoint (`POST /chat/voice-message`) accepts an audio file, transcribes it, runs it through the same `process_message()` logic as text chat, and returns both a text reply and MP3 audio (base64 encoded).
 

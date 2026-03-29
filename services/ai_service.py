@@ -25,6 +25,10 @@ ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVENLABS_VOICE_ID_EN = os.getenv("ELEVENLABS_VOICE_ID_EN", ELEVENLABS_VOICE_ID)
 ELEVENLABS_VOICE_ID_NE = os.getenv("ELEVENLABS_VOICE_ID_NE", ELEVENLABS_VOICE_ID)
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
+OPENAI_TTS_VOICE_EN = os.getenv("OPENAI_TTS_VOICE_EN", OPENAI_TTS_VOICE)
+OPENAI_TTS_VOICE_NE = os.getenv("OPENAI_TTS_VOICE_NE", OPENAI_TTS_VOICE)
 
 TRADE_KEYWORDS = {
     "construction": ["construction", "builder", "mason", "site", "plumbing", "electric", "scaffold", "निर्माण", "मिस्त्री"],
@@ -190,6 +194,11 @@ def synthesize_speech(text: str, language: str) -> bytes:
         if audio_bytes:
             return audio_bytes
 
+    if client:
+        audio_bytes = _synthesize_with_openai(text, language)
+        if audio_bytes:
+            return audio_bytes
+
     try:
         from gtts import gTTS
 
@@ -284,6 +293,24 @@ def _synthesize_with_elevenlabs(text: str, language: str) -> bytes:
         )
         if response.ok and response.content:
             return response.content
+    except Exception:
+        return b""
+    return b""
+
+
+def _synthesize_with_openai(text: str, language: str) -> bytes:
+    voice = OPENAI_TTS_VOICE_NE if language == "ne" else OPENAI_TTS_VOICE_EN
+    try:
+        response = client.audio.speech.create(
+            model=OPENAI_TTS_MODEL,
+            voice=voice,
+            input=text,
+        )
+        content = getattr(response, "content", None)
+        if content:
+            return content
+        if hasattr(response, "read"):
+            return response.read()
     except Exception:
         return b""
     return b""
