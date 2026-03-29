@@ -15,7 +15,7 @@ from models import ChatSession, Profile
 from schemas import BusinessViabilityOption, ChecklistItem
 from services.business_viability_service import build_viability_options
 from services.language_service import get_language_instruction
-from services.workflow_config import COMMON_DOMAIN_WORKFLOWS, DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
+from services.workflow_config import DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHOICES, SKILL_TAGS
 
 load_dotenv()
 
@@ -502,11 +502,16 @@ Conversation so far: {last_messages}
 
 Behavior rules:
 - Sound warm, practical, and trustworthy.
+- Be conversational, respectful, and calm.
+- Respond like a thoughtful human guide, not a questionnaire or dropdown menu.
 - Ask only the next most useful question.
 - Keep replies concise and natural, like a real product assistant.
 - Use Nepal-specific context when helpful.
 - Only advance the stage when the required information has actually been collected.
 - If the user gives multiple useful facts in one message, use all of them.
+- Always use the existing conversation context before asking for something again.
+- Do not list canned work categories unless the user explicitly asks for examples.
+- If the user says something broad like "I worked in hotels" or "I was in construction", acknowledge it and ask one natural follow-up.
 - For job seekers, keep skill tags in English internally.
 - For business starters, store the user's business idea inside the skills list as one short phrase.
 - Do not move to checklist generation unless district_target, savings_range, and a concrete business idea are all known.
@@ -766,6 +771,9 @@ def _compose_guided_reply(
     llm_reply: str | None,
 ) -> str:
     llm_reply = (llm_reply or "").strip()
+    if _use_llm_reply(llm_reply):
+        return llm_reply
+
     if stage in {"initial", "language_set"} and _is_small_talk_message(session.messages):
         return _respond(
             language,
@@ -779,40 +787,40 @@ def _compose_guided_reply(
             "तपाईं अहिले कुन देश वा सहरमा काम गर्दै हुनुहुन्छ?",
         )
     if next_stage == "collecting_basics":
-        domain_examples = ", ".join(workflow["key"] for workflow in COMMON_DOMAIN_WORKFLOWS)
         return _respond(
             language,
-            f"Thank you. What type of work did you do abroad? Common areas are {domain_examples}.",
-            "धन्यवाद। विदेशमा तपाईंले कस्तो काम गर्नुभयो? सामान्य क्षेत्रहरू निर्माण, हस्पिटालिटी, फ्याक्ट्री, कृषि, यातायात र घरेलु हेरचाह हुन्।",
+            "Thank you. What kind of work were you doing abroad, and what was your role like day to day?",
+            "धन्यवाद। विदेशमा तपाईंले कस्तो काम गर्नुहुन्थ्यो, र दिनहुँको भूमिका कस्तो थियो?",
         )
     if next_stage == "collecting_experience":
         trade_label = fields.get("trade_category") or "that field"
         return _respond(
             language,
-            f"Understood. About how many years of experience do you have in {trade_label}?",
+            f"That helps. About how many years of experience do you have in {trade_label}?",
             f"बुझें। {trade_label} क्षेत्रमा तपाईंको करिब कति वर्षको अनुभव छ?",
         )
     if next_stage == "path_decision":
+        trade_label = fields.get("trade_category")
         return _respond(
             language,
-            "When you return to Nepal, do you want me to help you find a job or build a small business plan?",
-            "नेपाल फर्केपछि तपाईंलाई जागिर खोज्न सहयोग चाहिन्छ कि सानो व्यवसायको योजना बनाउन?",
+            (
+                f"You already have useful experience{f' in {trade_label}' if trade_label else ''}. "
+                "When you return to Nepal, would it help more if I focused on finding you a job or shaping a small business plan?"
+            ),
+            "तपाईंको अनुभव उपयोगी देखिन्छ। नेपाल फर्केपछि म जागिरतर्फ बढी सहयोग गरूँ कि सानो व्यवसायको योजना बनाउनतर्फ?",
         )
     if next_stage == "collecting_skills":
-        trade = fields.get("trade_category") or _infer_trade_from_session(session.messages)
-        suggestions = ", ".join(SKILL_TAGS.get(trade, SKILL_TAGS["construction"])[:6])
         return _respond(
             language,
-            f"Great. To match the right jobs, tell me the skills you actually used most. You can pick from: {suggestions}.",
-            f"राम्रो। मिल्दो जागिर छान्न, तपाईंले सबैभन्दा धेरै प्रयोग गरेका सीप भन्नुस्। उदाहरण: {suggestions}।",
+            "Great. To match the right jobs, tell me the skills, tools, or day-to-day responsibilities you used most often in that work.",
+            "राम्रो। मिल्दो जागिर छान्न, त्यो काममा तपाईंले सबैभन्दा धेरै प्रयोग गरेका सीप, औजार, वा जिम्मेवारीहरू भन्नुस्।",
         )
     if next_stage == "collecting_business_details":
-        districts = ", ".join(DISTRICT_CHOICES[:4])
         savings = ", ".join(SAVINGS_CHOICES)
         return _respond(
             language,
-            f"Good choice. Tell me three things together: your target district, rough savings band ({savings}), and the business you want to start. Common districts: {districts}.",
-            f"राम्रो छनोट। तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ। उदाहरण जिल्ला: {districts}।",
+            f"Good choice. So I can make the plan realistic, tell me three things together: your target district, your rough savings band ({savings}), and the kind of business you want to start.",
+            f"राम्रो छनोट। योजना व्यवहारिक बनाउन तीन वटा कुरा सँगै भन्नुस्: फर्किन चाहेको जिल्ला, बचतको दायरा ({savings}), र कस्तो व्यवसाय सुरु गर्न चाहनुहुन्छ।",
         )
     if next_stage == "job_matching":
         return _respond(
@@ -848,6 +856,15 @@ def _generic_checklist(trade: str, district: str) -> list[dict[str, Any]]:
 
 def _validate_checklist_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [ChecklistItem.model_validate(item).model_dump() for item in items]
+
+
+def _use_llm_reply(reply: str | None) -> bool:
+    cleaned = (reply or "").strip()
+    if not cleaned:
+        return False
+    if len(cleaned) < 18:
+        return False
+    return True
 
 
 def _respond(language: str, en_text: str, ne_text: str) -> str:
