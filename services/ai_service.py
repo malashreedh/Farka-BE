@@ -19,8 +19,8 @@ from services.workflow_config import DISTRICT_CHOICES, PATH_CHOICES, SAVINGS_CHO
 
 load_dotenv()
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-FALLBACK_MODELS = [OPENAI_MODEL, "gpt-4o-mini", "gpt-4o"]
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+FALLBACK_MODELS = [OPENAI_MODEL, "gpt-5.4-mini", "gpt-4o-mini"]
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
