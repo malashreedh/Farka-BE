@@ -94,17 +94,16 @@ def voice_message(
 ):
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    # Pass "ne" hint to Whisper when session is already in Nepali so it outputs Devanagari script
+    # Pass "ne" hint to Whisper when session is already Nepali so it outputs Devanagari
     lang_hint = session.language.value if hasattr(session.language, "value") else str(session.language or "en")
-    transcript = transcribe_audio(audio.file, language=lang_hint if lang_hint == "ne" else None)
+    transcript = transcribe_audio(audio, language=lang_hint if lang_hint == "ne" else None)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
     # Always re-detect language from voice — overrides any prior text-based language setting
-    detected = detect_language(transcript)
-    session.language = detected
+    session.language = detect_language(transcript)
 
     result = _run_chat_turn(session, transcript, db)
     language = session.language.value if hasattr(session.language, "value") else str(session.language or "en")
@@ -114,7 +113,7 @@ def voice_message(
         "data": {
             **result,
             "transcript": transcript,
-            "audio_base64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
+            "audio_b64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
             "audio_mime_type": "audio/mpeg",
         }
     }
